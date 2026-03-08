@@ -10,3 +10,5 @@ tensorflow
 keras
 streamlit
 dagshub
+dvc
+dvc-s3
