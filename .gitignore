@@ -1,6 +1,6 @@
 venv/
 .vscode/
-Test Environment/
+Test Environment/oanda.cfg
 .env
 src/oanda.cfg
 

@@ -16,7 +16,7 @@ train:
     X_test_path: data/processed/predetors/test/forex_data_processed_test.csv
     y_train_path: data/processed/target/train/forex_data_processed_train_labels.csv
     y_test_path: data/processed/target/test/forex_data_processed_test_labels.csv
-    model: models/model.pkl
+    model_path: models/model.pkl
     param_grid:
         n_estimators: [50, 100, 200]
         max_depth: [3, 5, 7]
