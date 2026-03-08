@@ -1,0 +1,17 @@
+fetch: 
+    
+    output_path: data/raw/forex_data.csv
+
+preprocess:
+    input_path: data/raw/forex_data.csv
+    output_train: data/processed/forex_data_processed_train.csv
+    output_test: data/processed/forex_data_processed_test.csv
+    test_days: 7
+    n_lags: 5
+    
+train:
+    data: data/processed/forex_data_processed.csv
+    model: models/model.pkl
+    n_estimators: 100
+    max_depth: 5
+    

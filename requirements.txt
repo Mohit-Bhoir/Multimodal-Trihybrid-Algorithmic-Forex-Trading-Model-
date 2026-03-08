@@ -12,3 +12,4 @@ streamlit
 dagshub
 dvc
 dvc-s3
+python-dotenv
