@@ -3,4 +3,4 @@ venv/
 Test Environment/oanda.cfg
 .env
 src/oanda.cfg
-
+src/__pycache__/
