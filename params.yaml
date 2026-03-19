@@ -5,13 +5,14 @@ preprocess:
     input_path: data/raw/forex_data.csv
     train_path: data/processed/train/forex_data_processed_train.csv
     test_path: data/processed/test/forex_data_processed_test.csv
-    test_days: 7
+    test_months: 12
     
 train:
     train_path: data/processed/train/forex_data_processed_train.csv
     model_path: models/model.pkl
-    test_days: 7
+    test_months: 12
     n_lags: 5
+    model_params: models/feature_stats.pkl
     param_grid:
         - solver: [lbfgs]
           penalty: [l2]
@@ -22,9 +23,31 @@ train:
           C: [0.01, 0.1, 1.0, 10.0]
           max_iter: [500, 1000]
 
+train_dnn:
+    train_path: data/processed/train/forex_data_processed_train.csv
+    model_path: models/dnn_model.keras
+    model_params: models/dnn_feature_stats.pkl
+    test_months: 12
+    n_lags: 5
+    seed: 100
+    validation_split: 0.1
+    patience: 5
+    registered_model_name: DNNFXTradingModel
+    param_grid:
+        hl: [1, 2]
+        hu: [64, 128]
+        dropout: [false, true]
+        rate: [0.2]
+        regularize: [false, true]
+        reg_strength: [0.0005]
+        learning_rate: [0.0001]
+        batch_size: [32]
+        epochs: [10]
+
     
 
 evaluate:
     test_path: data/processed/test/forex_data_processed_test.csv
     model_path: models/model.pkl
-    report_path: reports/evaluation_report.txt
+    n_lags: 5
+    model_params: models/feature_stats.pkl
