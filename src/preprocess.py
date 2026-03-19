@@ -6,14 +6,11 @@ import datetime
 
 params = yaml.safe_load(open("params.yaml"))["preprocess"]
 
-def preprocess(input_path, train_path, test_path, test_days):
+def preprocess(input_path, train_path, test_path, test_months):
     df = pd.read_csv(input_path, parse_dates=["time"], index_col="time")
 
-    # df["returns"] = np.log(df["price"] / df["price"].shift(1))
-    # df["direction"] = np.sign(df["returns"])
 
-
-    test_start_date = df.index[-1] - datetime.timedelta(days=test_days)
+    test_start_date = df.index[-1] - pd.DateOffset(months=test_months)
 
     
     train_data = df[df.index < test_start_date].copy()
@@ -37,5 +34,5 @@ if __name__ == "__main__":
         params["input_path"],
         params["train_path"],
         params["test_path"],
-        params["test_days"],
+        params["test_months"],
     )

@@ -1,0 +1,475 @@
+import os
+import pickle
+import warnings
+from pathlib import Path
+
+import mlflow
+import numpy as np
+import pandas as pd
+import yaml
+from dotenv import load_dotenv
+from sklearn.metrics import accuracy_score, classification_report
+
+warnings.filterwarnings("ignore")
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+load_dotenv(BASE_DIR / ".env")
+
+MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI")
+MLFLOW_TRACKING_USERNAME = os.getenv("MLFLOW_TRACKING_USERNAME")
+MLFLOW_TRACKING_PASSWORD = os.getenv("MLFLOW_TRACKING_PASSWORD")
+
+if not all([MLFLOW_TRACKING_URI, MLFLOW_TRACKING_USERNAME, MLFLOW_TRACKING_PASSWORD]):
+    raise ValueError("Missing MLflow credentials in .env")
+
+os.environ["MLFLOW_TRACKING_URI"] = MLFLOW_TRACKING_URI
+os.environ["MLFLOW_TRACKING_USERNAME"] = MLFLOW_TRACKING_USERNAME
+os.environ["MLFLOW_TRACKING_PASSWORD"] = MLFLOW_TRACKING_PASSWORD
+
+params = yaml.safe_load((BASE_DIR / "params.yaml").read_text())["evaluate"]
+
+
+def resolve_path(path_value):
+    path = Path(path_value)
+    if path.is_absolute():
+        return path
+    return BASE_DIR / path
+
+
+def load_pickle(path_value):
+    with open(resolve_path(path_value), "rb") as file_handle:
+        return pickle.load(file_handle)
+
+
+def build_feature_frame(data, n_lags, mean=None, std=None):
+    frame = data.copy()
+    frame["returns"] = np.log(frame["price"] / frame["price"].shift(1))
+    frame["direction"] = np.sign(frame["returns"])
+
+    feature_cols = []
+    for lag in range(1, n_lags + 1):
+        column_name = f"returns_lag_{lag}"
+        frame[column_name] = frame["returns"].shift(lag)
+        feature_cols.append(column_name)
+
+    frame = frame.dropna().copy()
+
+    if mean is not None and std is not None:
+        aligned_mean = mean.reindex(feature_cols)
+        aligned_std = std.reindex(feature_cols).replace(0, 1)
+        frame.loc[:, feature_cols] = (frame[feature_cols] - aligned_mean) / aligned_std
+
+    return frame, feature_cols
+
+
+def compute_hit_ratio(predictions, actuals):
+    hits = np.sign(predictions * actuals)
+    correct_predictions = int((hits == 1).sum())
+    hit_ratio = (correct_predictions / len(hits) * 100) if len(hits) else 0.0
+    return hit_ratio, correct_predictions
+
+
+def is_within_trading_window(timestamp, start_hour=12, end_hour=16):
+    current_time = timestamp.time()
+    return current_time >= pd.Timestamp(f"{start_hour:02d}:00:00").time() and current_time <= pd.Timestamp(
+        f"{end_hour:02d}:00:00"
+    ).time()
+
+
+def extract_prediction_confidence(model, features, predictions):
+    if not hasattr(model, "predict_proba"):
+        raise ValueError("Loaded model does not support predict_proba, so the probability trade filter cannot be applied.")
+
+    probabilities = model.predict_proba(features)
+    class_to_index = {label: index for index, label in enumerate(model.classes_)}
+    prediction_indices = np.array([class_to_index[prediction] for prediction in predictions])
+    predicted_probabilities = probabilities[np.arange(len(predictions)), prediction_indices]
+    return pd.Series(predicted_probabilities, index=features.index, name="pred_proba")
+
+
+class IterativeBase:
+
+    def __init__(self, symbol, start, end, amount, use_spread=True, data=None, verbose=True):
+        self.symbol = symbol
+        self.start = start
+        self.end = end
+        self.initial_balance = amount
+        self.current_balance = amount
+        self.units = 0
+        self.use_spread = use_spread
+        self.trades = 0
+        self.position = 0
+        self.verbose = verbose
+        self.data = self.get_data(data)
+
+    def get_data(self, data=None):
+        if data is None:
+            raw = pd.read_csv(resolve_path(params["test_path"]), parse_dates=["time"], index_col="time")
+        else:
+            raw = data.copy()
+
+        raw = raw.sort_index()
+
+        if self.start is not None:
+            raw = raw.loc[raw.index >= pd.Timestamp(self.start)]
+        if self.end is not None:
+            raw = raw.loc[raw.index <= pd.Timestamp(self.end)]
+
+        if "spread" not in raw.columns:
+            raw["spread"] = 0.0
+        if "returns" not in raw.columns:
+            raw["returns"] = np.log(raw["price"] / raw["price"].shift(1))
+
+        return raw.dropna().copy()
+
+    def reset(self):
+        self.current_balance = self.initial_balance
+        self.units = 0
+        self.trades = 0
+        self.position = 0
+
+    def get_values(self, bar):
+        timestamp = self.data.index[bar]
+        date = str(timestamp.date())
+        time = str(timestamp.time())
+        price = round(self.data["price"].iloc[bar], 5)
+        spread = round(self.data["spread"].iloc[bar], 5)
+        return date, time, price, spread
+
+    def get_current_balance(self, bar):
+        date, time, _, _ = self.get_values(bar)
+        if self.verbose:
+            print(f"Date: {date} {time} | Current Balance: {self.current_balance:.2f}")
+
+    def buy_instrument(self, bar, units=None, amount=None):
+        date, time, price, spread = self.get_values(bar)
+        if self.use_spread:
+            price += spread / 2
+        if amount is not None:
+            units = int(amount / price)
+        self.current_balance -= units * price
+        self.units += units
+        self.trades += 1
+        if self.verbose:
+            print(
+                f"Date: {date} {time} | Action: BUY | Units: {units} | Price: {price:.5f} | Current Balance: {self.current_balance:.2f}"
+            )
+
+    def sell_instrument(self, bar, units=None, amount=None):
+        date, time, price, spread = self.get_values(bar)
+        if self.use_spread:
+            price -= spread / 2
+        if amount is not None:
+            units = int(amount / price)
+        self.current_balance += units * price
+        self.units -= units
+        self.trades += 1
+        if self.verbose:
+            print(
+                f"Date: {date} {time} | Action: SELL | Units: {units} | Price: {price:.5f} | Current Balance: {self.current_balance:.2f}"
+            )
+
+    def current_nav(self, bar):
+        _, _, price, _ = self.get_values(bar)
+        return self.current_balance + (self.units * price)
+
+    def performance_snapshot(self, bar, log_perf=False):
+        nav = self.current_nav(bar)
+        performance = (nav - self.initial_balance) / self.initial_balance * 100
+        if log_perf:
+            mlflow.log_metric("net_performance", performance)
+            mlflow.log_metric("ending_balance", nav)
+            mlflow.log_metric("trades_executed", self.trades)
+        return {
+            "ending_balance": nav,
+            "net_performance_pct": performance,
+            "trades_executed": self.trades,
+        }
+
+    def close_pos(self, bar, log_perf=False):
+        date, time, price, spread = self.get_values(bar)
+        print(75 * "-")
+        print(f"Date: {date} {time} | Closing Position of {self.units} units at {price:.5f}")
+        self.current_balance += self.units * price
+        self.current_balance -= (abs(self.units) * spread / 2) * self.use_spread
+        self.units = 0
+        self.position = 0
+        self.trades += 1
+        summary = self.performance_snapshot(bar, log_perf=log_perf)
+        self.get_current_balance(bar)
+        print(f"Net Performance: {summary['net_performance_pct']:.2f}%")
+        print(f"Number of trades executed: {self.trades}")
+        print(75 * "-")
+        return summary
+
+
+class IterativeBacktest(IterativeBase):
+
+    def go_long(self, bar, units=None, amount=None):
+        if self.position == -1:
+            self.buy_instrument(bar, units=-self.units)
+        if units is not None:
+            self.buy_instrument(bar, units=units)
+        elif amount is not None:
+            if amount == "all":
+                amount = self.current_balance
+            self.buy_instrument(bar, amount=amount)
+
+    def go_short(self, bar, units=None, amount=None):
+        if self.position == 1:
+            self.sell_instrument(bar, units=self.units)
+        if units is not None:
+            self.sell_instrument(bar, units=units)
+        elif amount is not None:
+            if amount == "all":
+                amount = self.current_balance
+            self.sell_instrument(bar, amount=amount)
+
+    def run_prediction_strategy(
+        self,
+        predictions,
+        actuals=None,
+        probabilities=None,
+        min_probability=0.52,
+        trading_start_hour=12,
+        trading_end_hour=17,
+        log_perf=False,
+    ):
+        predictions = predictions.loc[self.data.index].astype(int)
+        if probabilities is not None:
+            probabilities = probabilities.loc[self.data.index]
+        self.reset()
+
+        if self.verbose:
+            print("\n" + "=" * 75)
+            print("STARTING ITERATIVE BACKTEST")
+            print(f"Bars evaluated: {len(predictions)}")
+            print("=" * 75)
+
+        position_history = []
+        trade_history = []
+        probability_history = []
+        trading_window_history = []
+        probability_filter_history = []
+        decision_reason_history = []
+
+        for index, prediction in predictions.items():
+            bar = self.data.index.get_loc(index)
+            trade_executed = 0
+            action = "HOLD"
+            decision_probability = float(probabilities.loc[index]) if probabilities is not None else np.nan
+            within_trading_window = is_within_trading_window(
+                index,
+                start_hour=trading_start_hour,
+                end_hour=trading_end_hour,
+            )
+            passes_probability_filter = pd.notna(decision_probability) and decision_probability > min_probability
+            decision_reason = "No trade signal"
+
+            if prediction == 0:
+                action = "NEUTRAL"
+                decision_reason = "Predicted neutral class"
+            elif not within_trading_window:
+                action = "SKIP"
+                decision_reason = f"Outside trading window {trading_start_hour:02d}:00-{trading_end_hour:02d}:00 UTC"
+            elif probabilities is not None and not passes_probability_filter:
+                action = "SKIP"
+                decision_reason = f"Prediction confidence {decision_probability:.2%} <= {min_probability:.2%}"
+            elif prediction == 1 and self.position <= 0:
+                action = "GO LONG"
+                decision_reason = "Passed session and probability filters"
+                self.go_long(bar, amount="all")
+                self.position = 1
+                trade_executed = 1
+            elif prediction == -1 and self.position >= 0:
+                action = "GO SHORT"
+                decision_reason = "Passed session and probability filters"
+                self.go_short(bar, amount="all")
+                self.position = -1
+                trade_executed = 1
+            elif prediction == 1:
+                action = "STAY LONG"
+                decision_reason = "Already long"
+            elif prediction == -1:
+                action = "STAY SHORT"
+                decision_reason = "Already short"
+
+            if self.verbose:
+                print(
+                    f"Date: {index.strftime('%Y-%m-%d %H:%M:%S')} | Model Decision: {prediction} | Probability: {decision_probability:.2%} | Action: {action} | Position: {self.position} | Reason: {decision_reason}"
+                )
+
+            position_history.append(self.position)
+            trade_history.append(trade_executed)
+            probability_history.append(decision_probability)
+            trading_window_history.append(within_trading_window)
+            probability_filter_history.append(passes_probability_filter)
+            decision_reason_history.append(decision_reason)
+
+        last_bar = self.data.index.get_loc(predictions.index[-1])
+        if self.units != 0:
+            summary = self.close_pos(last_bar, log_perf=log_perf)
+        else:
+            summary = self.performance_snapshot(last_bar, log_perf=log_perf)
+
+        if actuals is not None:
+            hit_ratio, correct_predictions = compute_hit_ratio(predictions, actuals.loc[predictions.index])
+            summary["hit_ratio"] = hit_ratio
+            summary["correct_predictions"] = correct_predictions
+            summary["total_predictions"] = len(predictions)
+
+        results = self.data.loc[predictions.index].copy()
+        results["pred"] = predictions
+        results["position"] = position_history
+        results["trade_executed"] = trade_history
+        results["pred_proba"] = probability_history
+        results["within_trading_window"] = trading_window_history
+        results["passed_probability_filter"] = probability_filter_history
+        results["decision_reason"] = decision_reason_history
+
+        return summary, results
+
+    def test_logreg_strategy(self, lags=5, model_path=None, test_days=None, log_perf=False, feature_stats_path=None):
+        if model_path is None:
+            raise ValueError("model_path is required for unseen data evaluation. This method does not fit on evaluation data.")
+
+        stats_path = feature_stats_path or params["model_params"]
+        feature_stats = load_pickle(stats_path)
+        feature_frame, feature_cols = build_feature_frame(
+            self.data,
+            lags,
+            mean=feature_stats["mean"],
+            std=feature_stats["std"],
+        )
+
+        model = load_pickle(model_path)
+        feature_frame["pred"] = model.predict(feature_frame[feature_cols])
+        feature_frame["pred_proba"] = extract_prediction_confidence(model, feature_frame[feature_cols], feature_frame["pred"])
+        summary, strategy_results = self.run_prediction_strategy(
+            feature_frame["pred"],
+            actuals=feature_frame["direction"],
+            probabilities=feature_frame["pred_proba"],
+            log_perf=log_perf,
+        )
+
+        merged_results = feature_frame.join(
+            strategy_results[["position", "trade_executed"]],
+            how="left",
+        )
+
+        print(f"\nHit Ratio: {summary['hit_ratio']:.2f}%")
+        print(f"Total predictions: {summary['total_predictions']}")
+        print(f"Correct predictions: {summary['correct_predictions']}")
+
+        return model, merged_results, summary
+
+
+def evaluate(
+    test_path,
+    model_path,
+    model_params,
+    n_lags,
+    initial_balance=100000,
+    use_spread=True,
+    log_perf=True,
+    verbose=True,
+):
+    test_data = pd.read_csv(resolve_path(test_path), parse_dates=["time"], index_col="time")
+    model = load_pickle(model_path)
+    feature_stats = load_pickle(model_params)
+
+    evaluation_frame, feature_cols = build_feature_frame(
+        test_data,
+        n_lags,
+        mean=feature_stats["mean"],
+        std=feature_stats["std"],
+    )
+
+    x_test = evaluation_frame[feature_cols]
+    y_test = evaluation_frame["direction"]
+    evaluation_frame["pred"] = model.predict(x_test)
+    evaluation_frame["pred_proba"] = extract_prediction_confidence(model, x_test, evaluation_frame["pred"])
+
+    accuracy = accuracy_score(y_test, evaluation_frame["pred"])
+    hit_ratio, correct_predictions = compute_hit_ratio(evaluation_frame["pred"], y_test)
+
+    backtester = IterativeBacktest(
+        symbol="EVALUATION",
+        start=evaluation_frame.index.min(),
+        end=evaluation_frame.index.max(),
+        amount=initial_balance,
+        use_spread=use_spread,
+        data=evaluation_frame,
+        verbose=verbose,
+    )
+
+    mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+    mlflow.set_experiment("Unseen Test Data Prediction")
+
+    with mlflow.start_run():
+        backtest_summary, backtest_results = backtester.run_prediction_strategy(
+            evaluation_frame["pred"],
+            actuals=y_test,
+            probabilities=evaluation_frame["pred_proba"],
+            log_perf=log_perf,
+        )
+
+        mlflow.log_params(model.get_params())
+        mlflow.log_param("n_lags", n_lags)
+        mlflow.log_param("initial_balance", initial_balance)
+        mlflow.log_param("use_spread", use_spread)
+        mlflow.log_param("trading_window_utc", "12:00-16:00")
+        mlflow.log_param("min_prediction_probability", 0.52)
+        mlflow.log_param("test_rows", len(evaluation_frame))
+        mlflow.log_metric("accuracy", accuracy)
+        mlflow.log_metric("hit_ratio", hit_ratio)
+        mlflow.log_metric("correct_predictions", correct_predictions)
+        mlflow.log_metric("bars_in_trading_window", backtest_results["within_trading_window"].sum())
+        mlflow.log_metric("signals_passing_probability_filter", backtest_results["passed_probability_filter"].sum())
+        mlflow.sklearn.log_model(sk_model=model, name="model")
+
+    print("Classification Report:")
+    print(classification_report(y_test, evaluation_frame["pred"]))
+    print("Accuracy Score:")
+    print(f"{accuracy:.4f}")
+    print("Prediction Counts:")
+    print(evaluation_frame["pred"].value_counts())
+    print(f"Hit Ratio: {hit_ratio:.2f}%")
+    print(f"Net Performance: {backtest_summary['net_performance_pct']:.2f}%")
+    print(f"Ending Balance: {backtest_summary['ending_balance']:.2f}")
+    print(f"Trades Executed: {backtest_summary['trades_executed']}")
+
+    evaluation_results = evaluation_frame.join(
+        backtest_results[
+            [
+                "position",
+                "trade_executed",
+                "within_trading_window",
+                "passed_probability_filter",
+                "decision_reason",
+            ]
+        ],
+        how="left",
+    )
+
+    summary = {
+        "accuracy": accuracy,
+        "hit_ratio": hit_ratio,
+        "correct_predictions": correct_predictions,
+        "net_performance_pct": backtest_summary["net_performance_pct"],
+        "ending_balance": backtest_summary["ending_balance"],
+        "trades_executed": backtest_summary["trades_executed"],
+    }
+
+    return summary, evaluation_results
+
+
+if __name__ == "__main__":
+    evaluate(
+        params["test_path"],
+        params["model_path"],
+        params["model_params"],
+        params["n_lags"],
+    )
+
+

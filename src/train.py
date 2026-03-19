@@ -45,7 +45,7 @@ def hyperparameter_tuning(X_train, y_train,param_grid,model_path):
 #Load params from params.yaml
 params = yaml.safe_load(open("params.yaml"))['train']
 
-def train(train_path, model_path, param_grid, test_days, n_lags):
+def train(train_path, model_path, param_grid, test_months, n_lags,model_params):
     # Load the data
     data = pd.read_csv(train_path, parse_dates=['time'], index_col='time')
 
@@ -53,8 +53,8 @@ def train(train_path, model_path, param_grid, test_days, n_lags):
     data['returns'] = np.log(data['price'] / data['price'].shift(1))
     data['direction'] = np.sign(data['returns'])
     
-    #Split data with recent 7 days as test set here
-    test_start_date = data.index[-1] - datetime.timedelta(days=test_days)
+    #Split data with recent 12 months as test set here
+    test_start_date = data.index[-1] - pd.DateOffset(months=test_months)
 
     cols = []
     for lag in range(1, n_lags + 1):
@@ -62,7 +62,18 @@ def train(train_path, model_path, param_grid, test_days, n_lags):
         cols.append(f'returns_lag_{lag}')
     data.dropna(inplace=True)   
     
-        
+    mean = data[cols].mean()
+    std = data[cols].std()
+
+
+    # Save mean and std to models/feature_stats.pkl for later use
+    stats_path = os.path.join(BASE_DIR, 'models', 'feature_stats.pkl')
+    os.makedirs(os.path.dirname(stats_path), exist_ok=True)
+    with open(stats_path, 'wb') as f:
+        pickle.dump({'mean': mean, 'std': std}, f)
+
+    data[cols] = (data[cols] - mean) / std
+     
     X = data[cols].copy()
     y = data['direction']
 
@@ -119,4 +130,4 @@ def train(train_path, model_path, param_grid, test_days, n_lags):
 
 
 if __name__ == "__main__":
-    train(params['train_path'], params['model_path'], params['param_grid'],params['test_days'], params['n_lags'])
+    train(params['train_path'], params['model_path'], params['param_grid'],params['test_months'], params['n_lags'],params['model_params'])

@@ -26,8 +26,8 @@ def get_fetch_window():
     elif end.weekday() == 6:  # Sunday
         end = (end - datetime.timedelta(days=2)).replace(hour=21, minute=45)
 
-    # Exact 2 calendar months back
-    start = (pd.Timestamp(end) - pd.DateOffset(months=2)).to_pydatetime()
+    # Exact 5 calendar years back
+    start = (pd.Timestamp(end) - pd.DateOffset(years=3)).to_pydatetime()
     start = start.replace(second=0, microsecond=0)
 
     return start, end

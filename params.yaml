@@ -28,4 +28,3 @@ evaluate:
     test_path: data/processed/test/forex_data_processed_test.csv
     model_path: models/model.pkl
     report_path: reports/evaluation_report.txt
-    
