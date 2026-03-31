@@ -103,6 +103,31 @@ def train(train_path, model_path, param_grid, test_months, n_lags,model_params):
         accuracy = accuracy_score(y_test, y_pred)
         print(f"Accuracy: {accuracy}")
         
+        confusion_matrix_result = confusion_matrix(y_test, y_pred)
+        classification_report_dict = classification_report(y_test, y_pred, output_dict=True)
+        classification_report_text = classification_report(y_test, y_pred)
+
+        print("Confusion Matrix:")
+        print(confusion_matrix_result)
+        print("\nClassification Report:")
+        print(classification_report_text)
+
+        mlflow.log_metric("accuracy", float(accuracy))
+        mlflow.log_metrics({
+            "precision_macro": float(classification_report_dict["macro avg"]["precision"]),
+            "recall_macro": float(classification_report_dict["macro avg"]["recall"]),
+            "f1_macro": float(classification_report_dict["macro avg"]["f1-score"]),
+        })
+
+        mlflow.log_dict(
+            {
+                "confusion_matrix": confusion_matrix_result.tolist(),
+                "classification_report": classification_report_dict,
+            },
+            "evaluation_metrics.json",
+        )
+
+        mlflow.log_text(classification_report_text, "classification_report.txt")
         
         #Log additional metrics & params
         mlflow.log_metric("accuracy", accuracy)
