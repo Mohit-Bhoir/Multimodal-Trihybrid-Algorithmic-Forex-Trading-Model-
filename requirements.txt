@@ -45,3 +45,4 @@ transformers==4.51.3
 typing_extensions==4.13.2
 urllib3==2.4.0
 vaderSentiment==3.3.2
+tensorflow==2.10.0  
