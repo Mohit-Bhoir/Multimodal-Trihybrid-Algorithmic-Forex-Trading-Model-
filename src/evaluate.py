@@ -76,15 +76,17 @@ def is_within_trading_window(timestamp, start_hour=12, end_hour=16):
     ).time()
 
 
-def extract_prediction_confidence(model, features, predictions):
+def extract_long_probability(model, features):
     if not hasattr(model, "predict_proba"):
         raise ValueError("Loaded model does not support predict_proba, so the probability trade filter cannot be applied.")
 
     probabilities = model.predict_proba(features)
     class_to_index = {label: index for index, label in enumerate(model.classes_)}
-    prediction_indices = np.array([class_to_index[prediction] for prediction in predictions])
-    predicted_probabilities = probabilities[np.arange(len(predictions)), prediction_indices]
-    return pd.Series(predicted_probabilities, index=features.index, name="pred_proba")
+    if 1 not in class_to_index:
+        raise ValueError("Loaded model does not expose class '1', so long-class probability thresholds cannot be applied.")
+
+    long_probabilities = probabilities[:, class_to_index[1]]
+    return pd.Series(long_probabilities, index=features.index, name="pred_proba")
 
 
 class IterativeBase:
@@ -230,7 +232,8 @@ class IterativeBacktest(IterativeBase):
         predictions,
         actuals=None,
         probabilities=None,
-        min_probability=0.52,
+        short_probability_threshold=0.47,
+        long_probability_threshold=0.53,
         trading_start_hour=12,
         trading_end_hour=17,
         log_perf=False,
@@ -263,36 +266,41 @@ class IterativeBacktest(IterativeBase):
                 start_hour=trading_start_hour,
                 end_hour=trading_end_hour,
             )
-            passes_probability_filter = pd.notna(decision_probability) and decision_probability > min_probability
+            short_signal = pd.notna(decision_probability) and decision_probability < short_probability_threshold
+            long_signal = pd.notna(decision_probability) and decision_probability > long_probability_threshold
+            passes_probability_filter = short_signal or long_signal
             decision_reason = "No trade signal"
 
-            if prediction == 0:
-                action = "NEUTRAL"
-                decision_reason = "Predicted neutral class"
-            elif not within_trading_window:
+            if not within_trading_window:
                 action = "SKIP"
                 decision_reason = f"Outside trading window {trading_start_hour:02d}:00-{trading_end_hour:02d}:00 UTC"
             elif probabilities is not None and not passes_probability_filter:
-                action = "SKIP"
-                decision_reason = f"Prediction confidence {decision_probability:.2%} <= {min_probability:.2%}"
-            elif prediction == 1 and self.position <= 0:
+                action = "HOLD"
+                decision_reason = (
+                    f"Long probability {decision_probability:.2%} between "
+                    f"{short_probability_threshold:.2%} and {long_probability_threshold:.2%}"
+                )
+            elif long_signal and self.position <= 0:
                 action = "GO LONG"
-                decision_reason = "Passed session and probability filters"
+                decision_reason = f"Long probability {decision_probability:.2%} > {long_probability_threshold:.2%}"
                 self.go_long(bar, amount="all")
                 self.position = 1
                 trade_executed = 1
-            elif prediction == -1 and self.position >= 0:
+            elif short_signal and self.position >= 0:
                 action = "GO SHORT"
-                decision_reason = "Passed session and probability filters"
+                decision_reason = f"Long probability {decision_probability:.2%} < {short_probability_threshold:.2%}"
                 self.go_short(bar, amount="all")
                 self.position = -1
                 trade_executed = 1
-            elif prediction == 1:
+            elif long_signal:
                 action = "STAY LONG"
                 decision_reason = "Already long"
-            elif prediction == -1:
+            elif short_signal:
                 action = "STAY SHORT"
                 decision_reason = "Already short"
+            elif prediction == 0:
+                action = "NEUTRAL"
+                decision_reason = "Predicted neutral class"
 
             if self.verbose:
                 print(
@@ -344,7 +352,7 @@ class IterativeBacktest(IterativeBase):
 
         model = load_pickle(model_path)
         feature_frame["pred"] = model.predict(feature_frame[feature_cols])
-        feature_frame["pred_proba"] = extract_prediction_confidence(model, feature_frame[feature_cols], feature_frame["pred"])
+        feature_frame["pred_proba"] = extract_long_probability(model, feature_frame[feature_cols])
         summary, strategy_results = self.run_prediction_strategy(
             feature_frame["pred"],
             actuals=feature_frame["direction"],
@@ -388,7 +396,7 @@ def evaluate(
     x_test = evaluation_frame[feature_cols]
     y_test = evaluation_frame["direction"]
     evaluation_frame["pred"] = model.predict(x_test)
-    evaluation_frame["pred_proba"] = extract_prediction_confidence(model, x_test, evaluation_frame["pred"])
+    evaluation_frame["pred_proba"] = extract_long_probability(model, x_test)
 
     accuracy = accuracy_score(y_test, evaluation_frame["pred"])
     hit_ratio, correct_predictions = compute_hit_ratio(evaluation_frame["pred"], y_test)
@@ -419,7 +427,8 @@ def evaluate(
         mlflow.log_param("initial_balance", initial_balance)
         mlflow.log_param("use_spread", use_spread)
         mlflow.log_param("trading_window_utc", "12:00-16:00")
-        mlflow.log_param("min_prediction_probability", 0.52)
+        mlflow.log_param("short_probability_threshold", 0.46)
+        mlflow.log_param("long_probability_threshold", 0.54)
         mlflow.log_param("test_rows", len(evaluation_frame))
         mlflow.log_metric("accuracy", accuracy)
         mlflow.log_metric("hit_ratio", hit_ratio)
