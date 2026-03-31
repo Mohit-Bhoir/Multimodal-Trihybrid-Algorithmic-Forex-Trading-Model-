@@ -5,12 +5,12 @@ preprocess:
     input_path: data/raw/forex_data.csv
     train_path: data/processed/train/forex_data_processed_train.csv
     test_path: data/processed/test/forex_data_processed_test.csv
-    test_months: 12
+    test_months: 4
     
 train:
     train_path: data/processed/train/forex_data_processed_train.csv
     model_path: models/model.pkl
-    test_months: 12
+    test_months: 4
     n_lags: 5
     model_params: models/feature_stats.pkl
     param_grid:
@@ -27,7 +27,7 @@ train_dnn:
     train_path: data/processed/train/forex_data_processed_train.csv
     model_path: models/dnn_model.keras
     model_params: models/dnn_feature_stats.pkl
-    test_months: 12
+    test_months: 4
     n_lags: 5
     seed: 100
     validation_split: 0.1
@@ -51,3 +51,6 @@ evaluate:
     model_path: models/model.pkl
     n_lags: 5
     model_params: models/feature_stats.pkl
+
+live-stream:
+    
