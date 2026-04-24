@@ -18,3 +18,21 @@ tpqoax
 # Pipeline / experiment tooling
 dvc[s3]
 dagshub
+
+#News data
+vaderSentiment
+urllib
+transformers
+tokenizers
+blob
+textblob
+regex   
+requests
+nltk
+networkx
+jinja2  
+idna
+huggingface-hub
+feedparser
+beautifulsoup4
+torch
