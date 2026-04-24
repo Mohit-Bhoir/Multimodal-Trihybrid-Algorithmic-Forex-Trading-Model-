@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 import tensorflow as tf
 import tpqoa
+import time
 
 import warnings
 warnings.filterwarnings("ignore")
@@ -342,19 +343,27 @@ class MLTrader(tpqoa.tpqoa):
 if __name__ == "__main__":
     model, mean, std, feature_cols, lookback, window = load_lstm_artifacts(LSTM_MODEL_PATH, LSTM_STATS_PATH)
 
-    trader = MLTrader(config_file = str(BASE_DIR / "src" / "oanda.cfg"), 
-                      instrument = "EUR_USD", 
-                      bar_length = "15min", 
-                      units = 100000, 
-                      model = model,
-                      mean = mean,
-                      std = std,
-                      feature_cols = feature_cols,
-                      lookback = lookback,
-                      window = window)
-    trader.stream_data(trader.instrument)
-    if trader.position != 0: 
-        close_order = trader.create_order(trader.instrument, units = -trader.position * trader.units, 
-                                          suppress = True, ret = True) 
+    trader = MLTrader(
+        config_file=str(BASE_DIR / "src" / "oanda.cfg"),
+        instrument="EUR_USD",
+        bar_length="15min",
+        units=100000,
+        model=model, mean=mean, std=std,
+        feature_cols=feature_cols, lookback=lookback, window=window
+    )
+
+    while True:
+        try:
+            trader.stream_data(trader.instrument)
+        except KeyboardInterrupt:
+            break
+        except Exception as e:
+            print(f"Stream disconnected: {e}. Reconnecting in 5s...")
+            trader.bootstrap_history()   # refresh history after gap
+            time.sleep(5)
+
+    if trader.position != 0:
+        close_order = trader.create_order(trader.instrument, units=-trader.position * trader.units,
+                                          suppress=True, ret=True)
         trader.report_trade(close_order, "GOING NEUTRAL")
         trader.position = 0
