@@ -1,3 +1,4 @@
+import math
 import os
 import pickle
 from datetime import datetime, timedelta, timezone
@@ -18,6 +19,92 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 LSTM_MODEL_PATH = BASE_DIR / "models" / "lstm_model.h5"
 LSTM_STATS_PATH = BASE_DIR / "models" / "lstm_feature_stats.pkl"
 TRADING_TIMEZONE = ZoneInfo("Europe/London")
+
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).parent))
+from news import fetch_news, analyze_sentiment
+
+# ── News signal configuration ──────────────────────────────────────────────
+NEWS_QUERIES = [
+    "EURUSD news now",
+    "EUR USD breaking news",
+    "EURUSD live updates",
+    "EURUSD price move news",
+    "EURUSD reaction news",
+    "EURUSD market moving news",
+    "EURUSD volatility news now",
+    "EURUSD spike news",
+    "EURUSD drop news",
+    "euro dollar breaking news",
+    "USD breaking news forex",
+    "euro breaking news forex",
+    "forex market breaking news EUR USD",
+    "EURUSD central bank comments live",
+    "ECB comments live euro impact",
+    "Fed comments live USD impact",
+    "US economic data release EURUSD reaction",
+    "Eurozone data release EURUSD reaction",
+    "EURUSD headlines now",
+    "forex live headlines EUR USD"
+]
+NEWS_FETCH_MINUTES = 120   # look-back window for news articles
+NEWS_DECAY_LAMBDA  = 0.02  # exponential decay rate (half-weight at ~35 min)
+
+# ── Signal combination weights ─────────────────────────────────────────────
+LSTM_WEIGHT = 0.6
+NEWS_WEIGHT  = 0.4
+
+# ── Minimum combined confidence to enter a trade (dead zone) ──────────────
+# Combined signal must exceed this threshold in either direction.
+# Below it the model is considered undecided and no trade is placed.
+MIN_CONFIDENCE = 0.10   # 10 % of the [-1, +1] scale
+
+
+def get_news_signal(max_age_minutes=NEWS_FETCH_MINUTES,
+                    decay_lambda=NEWS_DECAY_LAMBDA,
+                    num_articles=5):
+    """Return a time-decayed sentiment score in [-1, 1] from recent EUR/USD news.
+
+    Exponential decay weights newer articles more heavily:
+        weight = exp(-lambda * age_in_minutes)
+    A score > 0 is bullish; < 0 is bearish.  Returns (score, n_unique_articles).
+    """
+    now = datetime.now(timezone.utc)
+    weighted_sum = 0.0
+    total_weight  = 0.0
+    seen = set()
+
+    for query in NEWS_QUERIES:
+        try:
+            articles = fetch_news(query,
+                                  num_articles=num_articles,
+                                  max_age_minutes=max_age_minutes,
+                                  fetch_content=False)  # titles only – fast
+        except Exception:
+            continue
+
+        for article in articles:
+            title = article["title"]
+            if title in seen:
+                continue
+            seen.add(title)
+
+            published_dt = article.get("published_dt")
+            if published_dt is None:
+                age_minutes = float(max_age_minutes)
+            else:
+                age_minutes = max(0.0, (now - published_dt).total_seconds() / 60.0)
+
+            weight = math.exp(-decay_lambda * age_minutes)
+            polarity, _ = analyze_sentiment(title)
+            weighted_sum += weight * polarity
+            total_weight  += weight
+
+    if total_weight == 0.0:
+        return 0.0, 0
+
+    score = weighted_sum / total_weight  # normalised to [-1, 1]
+    return score, len(seen)
 
 
 def load_lstm_artifacts(model_path, stats_path):
@@ -113,7 +200,7 @@ class MLTrader(tpqoa.tpqoa):
         history = history.rename(columns={"c": self.instrument})[[self.instrument]].dropna()
         history.index = pd.to_datetime(history.index, utc=True).tz_convert(TRADING_TIMEZONE)
         self.raw_data = history.copy()
-        self.last_bar = self.raw_data.index[-1]
+        self.last_bar = pd.Timestamp(aligned_local)
     
     def on_success(self, time, bid, ask):
         print(self.ticks, end = " ",flush=True)
@@ -131,10 +218,14 @@ class MLTrader(tpqoa.tpqoa):
             self.execute_trades()
             
     def resample_and_join(self):
-        self.raw_data = pd.concat([self.raw_data, self.tick_data.resample(self.bar_length, 
-                                                                          label="right").last().ffill().iloc[:-1]]) 
+        resampled = self.tick_data.resample(self.bar_length, label="right").last().ffill()
+        complete_bars = resampled.iloc[:-1]
+        if not complete_bars.empty:
+            self.raw_data = pd.concat([self.raw_data, complete_bars])
         self.tick_data = self.tick_data.iloc[-1:]
-        self.last_bar = self.raw_data.index[-1]
+        # Advance last_bar to the left edge of the current open bar so the
+        # on_success condition won't fire again until the next 15-min boundary.
+        self.last_bar = resampled.index[-1] - self.bar_length
        
     def define_strategy(self):
         df = self.raw_data.rename(columns={self.instrument: "price"}).copy()
@@ -148,11 +239,47 @@ class MLTrader(tpqoa.tpqoa):
         if len(sequence) < self.lookback:
             return
 
-        prediction = float(self.model.predict(sequence[np.newaxis, ...], verbose=0).reshape(-1)[0])
-        df["pred"] = np.nan
+        # ── LSTM signal ───────────────────────────────────────────────────────
+        prediction  = float(self.model.predict(sequence[np.newaxis, ...], verbose=0).reshape(-1)[0])
+        lstm_signal = (prediction - 0.5) * 2   # scale [0,1] → [-1,+1]
+
+        # ── News sentiment signal (time-decayed) ──────────────────────────────
+        news_signal, n_articles = get_news_signal()
+
+        # ── Weighted combination ──────────────────────────────────────────────
+        combined = LSTM_WEIGHT * lstm_signal + NEWS_WEIGHT * news_signal
+
+        # Dead zone: if combined conviction is too low, stay flat
+        if abs(combined) < MIN_CONFIDENCE:
+            position = 0
+            direction = "FLAT (low confidence)"
+        elif combined > 0:
+            position = 1
+            direction = "LONG"
+        else:
+            position = -1
+            direction = "SHORT"
+
+        # Store for use in report_trade
+        self._last_signal = {
+            "lstm_prob":    prediction,
+            "lstm_signal":  lstm_signal,
+            "news_signal":  news_signal,
+            "n_articles":   n_articles,
+            "combined":     combined,
+            "direction":    direction,
+        }
+
+        print(
+            f"\nLSTM prob={prediction:.3f}  signal={lstm_signal:+.3f} | "
+            f"News score={news_signal:+.3f} ({n_articles} articles) | "
+            f"Combined={combined:+.3f}  ->  {direction}"
+        )
+
+        df["pred"]     = np.nan
         df["position"] = np.nan
-        df.loc[df.index[-1], "pred"] = prediction
-        df.loc[df.index[-1], "position"] = 1 if prediction >= 0.5 else -1
+        df.loc[df.index[-1], "pred"]     = prediction
+        df.loc[df.index[-1], "position"] = position
 
         self.data = df.copy()
         
@@ -191,10 +318,26 @@ class MLTrader(tpqoa.tpqoa):
         pl = float(order["pl"])
         self.profits.append(pl)
         cumpl = sum(self.profits)
-        print("\n" + 100* "-")
+        print("\n" + 100 * "-")
         print("{} | {}".format(time, going))
         print("{} | units = {} | price = {} | P&L = {} | Cum P&L = {}".format(time, units, price, pl, cumpl))
-        print(100 * "-" + "\n") 
+
+        # ── Trade decision constraints ────────────────────────────────────────
+        sig = getattr(self, "_last_signal", None)
+        if sig:
+            lstm_conf   = abs(sig["lstm_signal"])   * 100   # 0-100 %
+            news_conf   = abs(sig["news_signal"])   * 100
+            comb_conf   = abs(sig["combined"])      * 100
+            print("  Trade taken at the following signal constraints:")
+            print(f"    Price model (LSTM) : prob={sig['lstm_prob']:.4f}  |  "
+                  f"signal={sig['lstm_signal']:+.4f}  |  confidence={lstm_conf:.1f}%  "
+                  f"(weight {LSTM_WEIGHT*100:.0f}%)")
+            print(f"    News sentiment     : score={sig['news_signal']:+.4f}  |  "
+                  f"confidence={news_conf:.1f}%  |  "
+                  f"articles={sig['n_articles']}  (weight {NEWS_WEIGHT*100:.0f}%)")
+            print(f"    Combined signal    : {sig['combined']:+.4f}  |  "
+                  f"final confidence={comb_conf:.1f}%  |  direction={sig['direction']}")
+        print(100 * "-" + "\n")
 
 if __name__ == "__main__":
     model, mean, std, feature_cols, lookback, window = load_lstm_artifacts(LSTM_MODEL_PATH, LSTM_STATS_PATH)
