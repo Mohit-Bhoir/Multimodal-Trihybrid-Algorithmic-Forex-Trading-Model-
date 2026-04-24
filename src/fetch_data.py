@@ -1,6 +1,5 @@
 import pandas as pd
 import sys
-from pandas import api
 import yaml
 import os 
 import tpqoa as tpqoa

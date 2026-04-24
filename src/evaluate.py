@@ -6,6 +6,7 @@ from pathlib import Path
 import mlflow
 import numpy as np
 import pandas as pd
+import tensorflow as tf
 import yaml
 from dotenv import load_dotenv
 from sklearn.metrics import accuracy_score, classification_report
@@ -41,25 +42,18 @@ def load_pickle(path_value):
         return pickle.load(file_handle)
 
 
-def build_feature_frame(data, n_lags, mean=None, std=None):
-    frame = data.copy()
-    frame["returns"] = np.log(frame["price"] / frame["price"].shift(1))
-    frame["direction"] = np.sign(frame["returns"])
-
-    feature_cols = []
-    for lag in range(1, n_lags + 1):
-        column_name = f"returns_lag_{lag}"
-        frame[column_name] = frame["returns"].shift(lag)
-        feature_cols.append(column_name)
-
-    frame = frame.dropna().copy()
-
-    if mean is not None and std is not None:
-        aligned_mean = mean.reindex(feature_cols)
-        aligned_std = std.reindex(feature_cols).replace(0, 1)
-        frame.loc[:, feature_cols] = (frame[feature_cols] - aligned_mean) / aligned_std
-
-    return frame, feature_cols
+def generate_features(data, window=20):
+    data = data.copy()
+    data["returns"] = np.log(data["price"] / data["price"].shift(1))
+    data["direction"] = np.where(data["returns"] > 0, 1, 0)
+    data["sma"] = data["price"].rolling(window).mean() - data["price"].rolling(150).mean()
+    data["boll"] = (data["price"] - data["price"].rolling(window).mean()) / data["price"].rolling(window).std()
+    data["min"] = data["price"].rolling(window).min() / data["price"] - 1
+    data["max"] = data["price"].rolling(window).max() / data["price"] - 1
+    data["mom"] = data["returns"].rolling(3).mean()
+    data["vol"] = data["returns"].rolling(window).std()
+    data.dropna(inplace=True)
+    return data
 
 
 def compute_hit_ratio(predictions, actuals):
@@ -69,7 +63,7 @@ def compute_hit_ratio(predictions, actuals):
     return hit_ratio, correct_predictions
 
 
-def is_within_trading_window(timestamp, start_hour=12, end_hour=16):
+def is_within_trading_window(timestamp, start_hour=13, end_hour=17):
     current_time = timestamp.time()
     return current_time >= pd.Timestamp(f"{start_hour:02d}:00:00").time() and current_time <= pd.Timestamp(
         f"{end_hour:02d}:00:00"
@@ -87,6 +81,25 @@ def extract_long_probability(model, features):
 
     long_probabilities = probabilities[:, class_to_index[1]]
     return pd.Series(long_probabilities, index=features.index, name="pred_proba")
+
+
+def build_feature_frame(data, lags, mean, std):
+    """Build feature frame with lagged features for model input."""
+    data = generate_features(data)
+    feature_cols = []
+    
+    for col in ["returns", "sma", "boll", "min", "max", "mom", "vol"]:
+        if col in data.columns:
+            for lag in range(1, lags + 1):
+                lag_col = f"{col}_lag_{lag}"
+                data[lag_col] = data[col].shift(lag)
+                feature_cols.append(lag_col)
+    
+    # Standardize features
+    data[feature_cols] = (data[feature_cols] - mean) / std
+    data.dropna(inplace=True)
+    
+    return data, feature_cols
 
 
 class IterativeBase:
@@ -232,9 +245,9 @@ class IterativeBacktest(IterativeBase):
         predictions,
         actuals=None,
         probabilities=None,
-        short_probability_threshold=0.47,
-        long_probability_threshold=0.53,
-        trading_start_hour=12,
+        short_probability_threshold=0.48,
+        long_probability_threshold=0.52,
+        trading_start_hour=13,
         trading_end_hour=17,
         log_perf=False,
     ):
@@ -375,80 +388,122 @@ class IterativeBacktest(IterativeBase):
 def evaluate(
     test_path,
     model_path,
-    model_params,
-    n_lags,
+    stats_path,
     initial_balance=100000,
     use_spread=True,
     log_perf=True,
     verbose=True,
 ):
+    # -----------------------
+    # LOAD STATS + MODEL
+    # -----------------------
+    stats = load_pickle(stats_path)
+    mean = stats["mean"]
+    std = stats["std"]
+    feature_cols = stats["feature_cols"]
+    lookback = stats["lookback"]
+    window = stats["window"]
+
+    model = tf.keras.models.load_model(resolve_path(model_path))
+
+    # -----------------------
+    # LOAD & PREPARE TEST DATA
+    # -----------------------
     test_data = pd.read_csv(resolve_path(test_path), parse_dates=["time"], index_col="time")
-    model = load_pickle(model_path)
-    feature_stats = load_pickle(model_params)
+    df = generate_features(test_data, window=window)
 
-    evaluation_frame, feature_cols = build_feature_frame(
-        test_data,
-        n_lags,
-        mean=feature_stats["mean"],
-        std=feature_stats["std"],
-    )
+    # Standardise with training stats
+    df[feature_cols] = (df[feature_cols] - mean) / std
 
-    x_test = evaluation_frame[feature_cols]
-    y_test = evaluation_frame["direction"]
-    evaluation_frame["pred"] = model.predict(x_test)
-    evaluation_frame["pred_proba"] = extract_long_probability(model, x_test)
+    # -----------------------
+    # CREATE SEQUENCES
+    # -----------------------
+    features = df[feature_cols].values
+    X_seq, seq_indices = [], []
+    for i in range(lookback, len(features)):
+        X_seq.append(features[i - lookback:i])
+        seq_indices.append(df.index[i])
 
-    accuracy = accuracy_score(y_test, evaluation_frame["pred"])
-    hit_ratio, correct_predictions = compute_hit_ratio(evaluation_frame["pred"], y_test)
+    X_seq = np.array(X_seq, dtype=np.float32)
+    df = df.loc[seq_indices].copy()
 
+    # -----------------------
+    # PREDICTIONS
+    # -----------------------
+    probs = model.predict(X_seq, verbose=0).flatten()
+    df["pred_proba"] = probs
+    df["pred"] = (probs >= 0.5).astype(int)
+
+    y_test = df["direction"]
+
+    # -----------------------
+    # METRICS
+    # -----------------------
+    accuracy = accuracy_score(y_test, df["pred"])
+    hit_ratio, correct_predictions = compute_hit_ratio(df["pred"], df["direction"])
+
+    # -----------------------
+    # BACKTEST
+    # -----------------------
     backtester = IterativeBacktest(
         symbol="EVALUATION",
-        start=evaluation_frame.index.min(),
-        end=evaluation_frame.index.max(),
+        start=df.index.min(),
+        end=df.index.max(),
         amount=initial_balance,
         use_spread=use_spread,
-        data=evaluation_frame,
+        data=df,
         verbose=verbose,
     )
 
     mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
-    mlflow.set_experiment("Unseen Test Data Prediction")
+    mlflow.set_experiment("Unseen Test Data Prediction (LSTM)")
 
     with mlflow.start_run():
+
         backtest_summary, backtest_results = backtester.run_prediction_strategy(
-            evaluation_frame["pred"],
-            actuals=y_test,
-            probabilities=evaluation_frame["pred_proba"],
+            df["pred"],
+            actuals=df["direction"],
+            probabilities=df["pred_proba"],
             log_perf=log_perf,
         )
 
-        mlflow.log_params(model.get_params())
-        mlflow.log_param("n_lags", n_lags)
+        # -----------------------
+        # LOGGING
+        # -----------------------
+        mlflow.log_param("lookback", lookback)
+        mlflow.log_param("window", window)
+        mlflow.log_param("features", str(feature_cols))
         mlflow.log_param("initial_balance", initial_balance)
         mlflow.log_param("use_spread", use_spread)
-        mlflow.log_param("trading_window_utc", "12:00-16:00")
-        mlflow.log_param("short_probability_threshold", 0.46)
-        mlflow.log_param("long_probability_threshold", 0.54)
-        mlflow.log_param("test_rows", len(evaluation_frame))
+        mlflow.log_param("trading_window_utc", "12:00-17:00")
+        mlflow.log_param("short_probability_threshold", 0.47)
+        mlflow.log_param("long_probability_threshold", 0.53)
+
         mlflow.log_metric("accuracy", accuracy)
         mlflow.log_metric("hit_ratio", hit_ratio)
         mlflow.log_metric("correct_predictions", correct_predictions)
-        mlflow.log_metric("bars_in_trading_window", backtest_results["within_trading_window"].sum())
-        mlflow.log_metric("signals_passing_probability_filter", backtest_results["passed_probability_filter"].sum())
-        mlflow.sklearn.log_model(sk_model=model, name="model")
+        mlflow.log_metric("bars_in_trading_window", int(backtest_results["within_trading_window"].sum()))
+        mlflow.log_metric("signals_passing_probability_filter", int(backtest_results["passed_probability_filter"].sum()))
 
+        mlflow.tensorflow.log_model(model, artifact_path="model")
+
+    # -----------------------
+    # PRINT RESULTS
+    # -----------------------
     print("Classification Report:")
-    print(classification_report(y_test, evaluation_frame["pred"]))
-    print("Accuracy Score:")
-    print(f"{accuracy:.4f}")
-    print("Prediction Counts:")
-    print(evaluation_frame["pred"].value_counts())
+    print(classification_report(y_test, df["pred"]))
+
+    print(f"Accuracy: {accuracy:.4f}")
+    print(df["pred"].value_counts())
     print(f"Hit Ratio: {hit_ratio:.2f}%")
     print(f"Net Performance: {backtest_summary['net_performance_pct']:.2f}%")
     print(f"Ending Balance: {backtest_summary['ending_balance']:.2f}")
     print(f"Trades Executed: {backtest_summary['trades_executed']}")
 
-    evaluation_results = evaluation_frame.join(
+    # -----------------------
+    # FINAL RESULTS
+    # -----------------------
+    evaluation_results = df.join(
         backtest_results[
             [
                 "position",
@@ -477,8 +532,7 @@ if __name__ == "__main__":
     evaluate(
         params["test_path"],
         params["model_path"],
-        params["model_params"],
-        params["n_lags"],
+        params["stats_path"],
     )
 
 
