@@ -8,49 +8,46 @@ preprocess:
     test_months: 4
     
 train:
-    train_path: data/processed/train/forex_data_processed_train.csv
-    model_path: models/model.pkl
-    test_months: 4
-    n_lags: 5
-    model_params: models/feature_stats.pkl
-    param_grid:
-        - solver: [lbfgs]
-          penalty: [l2]
-          C: [0.01, 0.1, 1.0, 10.0]
-          max_iter: [500, 1000]
-        - solver: [saga]
-          penalty: [l1, l2]
-          C: [0.01, 0.1, 1.0, 10.0]
-          max_iter: [500, 1000]
+  train_path: data/processed/train/forex_data_processed_train.csv
+  model_path: models/lstm_model.h5
+  scaler_path: models/scaler.pkl
 
-train_dnn:
-    train_path: data/processed/train/forex_data_processed_train.csv
-    model_path: models/dnn_model.keras
-    model_params: models/dnn_feature_stats.pkl
-    test_months: 4
-    n_lags: 5
-    seed: 100
-    validation_split: 0.1
-    patience: 5
-    registered_model_name: DNNFXTradingModel
-    param_grid:
-        hl: [1, 2]
-        hu: [64, 128]
-        dropout: [false, true]
-        rate: [0.2]
-        regularize: [false, true]
-        reg_strength: [0.0005]
-        learning_rate: [0.0001]
-        batch_size: [32]
-        epochs: [10]
+  sequence_length: 50
+
+  validation_months: 4
+
+  lstm_params:
+    units_1: [32, 64]
+    units_2: [16, 32]
+    dropout: [0.1, 0.2]
+    batch_size: [32, 64]
+    epochs: 10
+
 
     
 
+train_lstm:
+  train_path: data/processed/train/forex_data_processed_train.csv
+  model_path: models/lstm_model.h5
+  stats_path: models/lstm_feature_stats.pkl
+  lookback: 50
+  window: 20
+  validation_months: 4
+  patience: 10
+  seed: 100
+  registered_model_name: LSTMFXTradingModel
+  param_grid:
+    units_1: [32, 64]
+    units_2: [16, 32]
+    dropout: [0.1, 0.2]
+    batch_size: [32, 64]
+    epochs: [10]
+    learning_rate: [0.001, 0.0005]
+
 evaluate:
-    test_path: data/processed/test/forex_data_processed_test.csv
-    model_path: models/model.pkl
-    n_lags: 5
-    model_params: models/feature_stats.pkl
+  test_path: data/processed/test/forex_data_processed_test.csv
+  model_path: models/lstm_model.h5
+  stats_path: models/lstm_feature_stats.pkl
 
 live-stream:
     
