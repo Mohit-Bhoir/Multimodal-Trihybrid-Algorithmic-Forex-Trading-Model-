@@ -23,7 +23,13 @@ TRADING_TIMEZONE = ZoneInfo("Europe/London")
 
 import sys as _sys
 _sys.path.insert(0, str(Path(__file__).parent))
-from news import fetch_news, analyze_sentiment
+try:
+    from news import fetch_news, analyze_sentiment
+    _NEWS_AVAILABLE = True
+except Exception:
+    _NEWS_AVAILABLE = False
+    def fetch_news(*a, **kw): return []
+    def analyze_sentiment(*a, **kw): return 0.0
 
 # ── News signal configuration ──────────────────────────────────────────────
 NEWS_QUERIES = [
@@ -80,7 +86,7 @@ def get_news_signal(max_age_minutes=NEWS_FETCH_MINUTES,
             articles = fetch_news(query,
                                   num_articles=num_articles,
                                   max_age_minutes=max_age_minutes,
-                                  fetch_content=False)  # titles only – fast
+                                  fetch_content=True)  # full body for richer sentiment
         except Exception:
             continue
 
@@ -97,7 +103,10 @@ def get_news_signal(max_age_minutes=NEWS_FETCH_MINUTES,
                 age_minutes = max(0.0, (now - published_dt).total_seconds() / 60.0)
 
             weight = math.exp(-decay_lambda * age_minutes)
-            polarity, _ = analyze_sentiment(title)
+            # Combine title + body; fall back to title-only if content is empty
+            content = (article.get("content") or "").strip()
+            text_to_analyse = f"{title}. {content}" if content else title
+            polarity, _ = analyze_sentiment(text_to_analyse)
             weighted_sum += weight * polarity
             total_weight  += weight
 
