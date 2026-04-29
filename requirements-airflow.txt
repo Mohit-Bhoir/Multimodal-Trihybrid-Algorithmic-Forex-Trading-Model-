@@ -1,0 +1,5 @@
+# Airflow DAG dependencies — installed into the Astro Airflow Docker image.
+# Keep this minimal: only what daily_data_refresh.py needs at runtime.
+
+tpqoax
+pandas
