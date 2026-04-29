@@ -45,16 +45,17 @@ def _get_model():
     return load_lstm_artifacts()
 
 
-@st.cache_resource
-def _get_bt_ui_state() -> dict:
-    """Persist sidebar slider values across page navigations."""
-    return {
-        "long_threshold":  0.55,
-        "short_threshold": 0.45,
-        "sl_pct":          0.10,   # Stop loss slider value (in %)
-        "tp_pct":          0.20,   # Take profit slider value (in %)
-        "capital":         100_000.0,
-    }
+# Slider defaults — initialised once per session
+_BT_UI_DEFAULTS = {
+    "long_threshold":  0.55,
+    "short_threshold": 0.45,
+    "sl_pct":          0.10,
+    "tp_pct":          0.20,
+    "capital":         100_000.0,
+}
+for _k, _v in _BT_UI_DEFAULTS.items():
+    if f"bt_{_k}" not in st.session_state:
+        st.session_state[f"bt_{_k}"] = _v
 
 
 @st.cache_resource
@@ -68,8 +69,6 @@ try:
 except Exception as exc:
     st.error(f"Cannot load LSTM model: {exc}. Train the model first.")
     st.stop()
-
-_bt_ui = _get_bt_ui_state()
 
 # ── Load historical data (cached) ─────────────────────────────────────────────
 @st.cache_data(show_spinner="Loading historical data…")
@@ -117,26 +116,26 @@ with st.sidebar:
     # ── Signal thresholds ─────────────────────────────────────────────────────
     st.subheader("🎯 Signal Thresholds")
     long_threshold  = st.slider("Long Threshold",  0.50, 1.00,
-                                 float(_bt_ui["long_threshold"]), 0.01,
-                                 help="Prob ≥ this → LONG signal")
+                                 key="bt_long_threshold",
+                                 help="Prob ≥ this → LONG signal",
+                                 step=0.01)
     short_threshold = st.slider("Short Threshold", 0.00, 0.50,
-                                 float(_bt_ui["short_threshold"]), 0.01,
-                                 help="Prob ≤ this → SHORT signal")
-    _bt_ui["long_threshold"]  = long_threshold
-    _bt_ui["short_threshold"] = short_threshold
+                                 key="bt_short_threshold",
+                                 help="Prob ≤ this → SHORT signal",
+                                 step=0.01)
 
     # ── Risk management ───────────────────────────────────────────────────────
     st.subheader("\U0001f6e1\ufe0f Risk Management")
     _sl_pct = st.slider("Stop Loss (%)",   0.10, 5.0,
-                        float(_bt_ui["sl_pct"]), 0.10,
+                        key="bt_sl_pct",
+                        step=0.10,
                         help="Close losing position when return from entry falls by this %. "
                              "For EUR/USD: 0.10% \u2248 12 pips.")
     _tp_pct = st.slider("Take Profit (%)", 0.10, 5.0,
-                        float(_bt_ui["tp_pct"]), 0.10,
+                        key="bt_tp_pct",
+                        step=0.10,
                         help="Close winning position when return from entry rises by this %. "
                              "For EUR/USD: 0.20% \u2248 23 pips.")
-    _bt_ui["sl_pct"] = _sl_pct
-    _bt_ui["tp_pct"] = _tp_pct
     stop_loss   = _sl_pct / 100
     take_profit = _tp_pct / 100
     st.caption("\U0001f4cb Spread is taken from the actual per-bar values in the CSV data.")
@@ -144,8 +143,7 @@ with st.sidebar:
     # ── Capital ───────────────────────────────────────────────────────────────
     st.subheader("💰 Capital")
     capital = st.number_input("Starting Capital (£)", min_value=1_000.0,
-                               value=float(_bt_ui["capital"]), step=1_000.0, format="%.2f")
-    _bt_ui["capital"] = capital
+                               key="bt_capital", step=1_000.0, format="%.2f")
 
     st.divider()
     run_btn = st.button("▶️  Run Backtest", type="primary", use_container_width=True)
@@ -253,6 +251,19 @@ with _s4:
 with _s5:
     st.metric("\U0001f7e2 TP Triggered", metrics.get("tp_count", 0),
               help="Number of positions closed by Take Profit")
+
+# ── Parameters used in this run ──────────────────────────────────────────────
+if _bt_store["params"]:
+    _p = _bt_store["params"]
+    st.caption(
+        f"**Run parameters:** "
+        f"Long ≥ {_p.get('long_threshold', '?'):.2f}  ·  "
+        f"Short ≤ {_p.get('short_threshold', '?'):.2f}  ·  "
+        f"SL {_p.get('stop_loss', 0)*100:.2f}%  ·  "
+        f"TP {_p.get('take_profit', 0)*100:.2f}%  ·  "
+        f"Capital £{_p.get('capital', 0):,.0f}  ·  "
+        f"{_p.get('start_date', '?')} → {_p.get('end_date', '?')}"
+    )
 
 st.divider()
 

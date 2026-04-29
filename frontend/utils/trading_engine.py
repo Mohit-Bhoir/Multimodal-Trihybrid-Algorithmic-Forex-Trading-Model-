@@ -537,8 +537,7 @@ def _trade(ts, action, entry, exit_, pnl, side, prob):
 
 
 def _resolve_position(prob, sig, long_thr, short_thr, min_conf):
-    if   abs(sig) < min_conf:    return 0
-    elif prob >= long_thr:       return 1
+    if   prob >= long_thr:       return 1
     elif prob <= short_thr:      return -1
     else:                        return 0
 
