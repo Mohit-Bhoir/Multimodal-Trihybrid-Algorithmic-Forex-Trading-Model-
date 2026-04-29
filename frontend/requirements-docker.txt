@@ -1,0 +1,21 @@
+# Streamlit frontend — Linux Docker dependencies
+# (replaces root requirements.txt which contains Windows-only packages)
+
+# UI / charts
+streamlit>=1.32.0
+plotly>=5.18.0
+
+# Data
+pandas
+numpy<2
+
+# ML inference (must match the version the model was trained with)
+tensorflow==2.10.0
+
+# Trading API
+tpqoax
+
+# Utilities
+scikit-learn
+joblib
+pyyaml

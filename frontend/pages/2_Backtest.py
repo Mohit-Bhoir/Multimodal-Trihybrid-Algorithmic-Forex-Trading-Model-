@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT / "frontend"))
 
 from utils.trading_engine import (
-    BST, TRAIN_CSV, TEST_CSV,
+    BST, BACKTEST_CSV,
     BacktestEngine, load_lstm_artifacts,
 )
 
@@ -73,15 +73,11 @@ except Exception as exc:
 # ── Load historical data (cached) ─────────────────────────────────────────────
 @st.cache_data(show_spinner="Loading historical data…")
 def _load_data() -> pd.DataFrame:
-    frames = []
-    for path in [TRAIN_CSV, TEST_CSV]:
-        if path.exists():
-            df = pd.read_csv(path, parse_dates=["time"])
-            cols = ["time", "price"] + (["spread"] if "spread" in df.columns else [])
-            frames.append(df[cols])
-    if not frames:
+    if not BACKTEST_CSV.exists():
         return pd.DataFrame()
-    data = (pd.concat(frames)
+    df = pd.read_csv(BACKTEST_CSV, parse_dates=["time"])
+    cols = ["time", "price"] + (["spread"] if "spread" in df.columns else [])
+    data = (df[cols]
               .sort_values("time")
               .drop_duplicates("time")
               .set_index("time"))

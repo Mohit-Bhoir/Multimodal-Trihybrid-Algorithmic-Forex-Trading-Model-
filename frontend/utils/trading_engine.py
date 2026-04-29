@@ -32,8 +32,9 @@ LSTM_MODEL_PATH = ROOT / "models" / "lstm_model.h5"
 LSTM_STATS_PATH = ROOT / "models" / "lstm_feature_stats.pkl"
 OANDA_CONFIG_PATH = ROOT / "src" / "oanda.cfg"
 
-TRAIN_CSV = ROOT / "data" / "processed" / "train" / "forex_data_processed_train.csv"
-TEST_CSV  = ROOT / "data" / "processed" / "test"  / "forex_data_processed_test.csv"
+# Backtest data — single append-only CSV maintained by the Airflow DAG.
+# Kept separate from the model-training pipeline (data/raw/, data/processed/).
+BACKTEST_CSV = ROOT / "data" / "backtest" / "forex_data_backtest.csv"
 
 FEATURE_COLS = ["returns", "sma", "boll", "min", "max", "mom", "vol"]
 
