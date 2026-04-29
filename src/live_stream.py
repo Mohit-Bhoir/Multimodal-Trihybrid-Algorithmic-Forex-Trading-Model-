@@ -23,43 +23,10 @@ TRADING_TIMEZONE = ZoneInfo("Europe/London")
 
 import sys as _sys
 _sys.path.insert(0, str(Path(__file__).parent))
-try:
-    from news import fetch_news, analyze_sentiment
-    _NEWS_AVAILABLE = True
-except Exception:
-    _NEWS_AVAILABLE = False
-    def fetch_news(*a, **kw): return []
-    def analyze_sentiment(*a, **kw): return 0.0
+# News integration removed — using LSTM-only signals for now.
 
-# ── News signal configuration ──────────────────────────────────────────────
-NEWS_QUERIES = [
-    "EURUSD news now",
-    "EUR USD breaking news",
-    "EURUSD live updates",
-    "EURUSD price move news",
-    "EURUSD reaction news",
-    "EURUSD market moving news",
-    "EURUSD volatility news now",
-    "EURUSD spike news",
-    "EURUSD drop news",
-    "euro dollar breaking news",
-    "USD breaking news forex",
-    "euro breaking news forex",
-    "forex market breaking news EUR USD",
-    "EURUSD central bank comments live",
-    "ECB comments live euro impact",
-    "Fed comments live USD impact",
-    "US economic data release EURUSD reaction",
-    "Eurozone data release EURUSD reaction",
-    "EURUSD headlines now",
-    "forex live headlines EUR USD"
-]
-NEWS_FETCH_MINUTES = 120   # look-back window for news articles
-NEWS_DECAY_LAMBDA  = 0.02  # exponential decay rate (half-weight at ~35 min)
-
-# ── Signal combination weights ─────────────────────────────────────────────
-LSTM_WEIGHT = 0.6
-NEWS_WEIGHT  = 0.4
+# ── Signal combination weights (LSTM-only) ─────────────────────────────────
+LSTM_WEIGHT = 1.0
 
 # ── Minimum combined confidence to enter a trade (dead zone) ──────────────
 # Combined signal must exceed this threshold in either direction.
@@ -67,54 +34,7 @@ NEWS_WEIGHT  = 0.4
 MIN_CONFIDENCE = 0.10   # 10 % of the [-1, +1] scale
 
 
-def get_news_signal(max_age_minutes=NEWS_FETCH_MINUTES,
-                    decay_lambda=NEWS_DECAY_LAMBDA,
-                    num_articles=5):
-    """Return a time-decayed sentiment score in [-1, 1] from recent EUR/USD news.
-
-    Exponential decay weights newer articles more heavily:
-        weight = exp(-lambda * age_in_minutes)
-    A score > 0 is bullish; < 0 is bearish.  Returns (score, n_unique_articles).
-    """
-    now = datetime.now(timezone.utc)
-    weighted_sum = 0.0
-    total_weight  = 0.0
-    seen = set()
-
-    for query in NEWS_QUERIES:
-        try:
-            articles = fetch_news(query,
-                                  num_articles=num_articles,
-                                  max_age_minutes=max_age_minutes,
-                                  fetch_content=True)  # full body for richer sentiment
-        except Exception:
-            continue
-
-        for article in articles:
-            title = article["title"]
-            if title in seen:
-                continue
-            seen.add(title)
-
-            published_dt = article.get("published_dt")
-            if published_dt is None:
-                age_minutes = float(max_age_minutes)
-            else:
-                age_minutes = max(0.0, (now - published_dt).total_seconds() / 60.0)
-
-            weight = math.exp(-decay_lambda * age_minutes)
-            # Combine title + body; fall back to title-only if content is empty
-            content = (article.get("content") or "").strip()
-            text_to_analyse = f"{title}. {content}" if content else title
-            polarity, _ = analyze_sentiment(text_to_analyse)
-            weighted_sum += weight * polarity
-            total_weight  += weight
-
-    if total_weight == 0.0:
-        return 0.0, 0
-
-    score = weighted_sum / total_weight  # normalised to [-1, 1]
-    return score, len(seen)
+# get_news_signal removed — news-based signals are disabled.
 
 
 def load_lstm_artifacts(model_path, stats_path):
@@ -145,8 +65,15 @@ def generate_features(data, window=20):
 
 
 def infer_granularity(bar_length):
-    if bar_length == pd.Timedelta(minutes=15):
-        return "M15"
+    mapping = {
+        pd.Timedelta(minutes=1):  "M1",
+        pd.Timedelta(minutes=5):  "M5",
+        pd.Timedelta(minutes=15): "M15",
+        pd.Timedelta(hours=1):    "H1",
+        pd.Timedelta(hours=4):    "H4",
+    }
+    if bar_length in mapping:
+        return mapping[bar_length]
     raise ValueError(f"Unsupported bar length for OANDA history bootstrap: {bar_length}.")
 
 
@@ -154,18 +81,22 @@ def infer_granularity(bar_length):
 
 class MLTrader(tpqoa.tpqoa):
     
-    def __init__(self, config_file, instrument, bar_length, units, model, mean, std, feature_cols, lookback, window):
+    def __init__(self, config_file, instrument, bar_length, units, model, mean, std, feature_cols, lookback, window,
+                 stop_loss=0.005, take_profit=0.010):
         super().__init__(config_file)
         self.instrument = instrument
         self.bar_length = pd.to_timedelta(bar_length)
         self.granularity = infer_granularity(self.bar_length)
         self.tick_data = pd.DataFrame()
         self.raw_data = pd.DataFrame()
-        self.data = None 
+        self.data = None
         self.last_bar = pd.Timestamp.now(tz=TRADING_TIMEZONE).floor(self.bar_length)
         self.units = units
         self.position = 0
         self.profits = []
+        self.stop_loss   = stop_loss    # fraction, e.g. 0.005 = 0.5 %
+        self.take_profit = take_profit  # fraction, e.g. 0.010 = 1.0 %
+        self.entry_price: float | None = None
         
         self.model = model
         self.mean = mean
@@ -177,40 +108,43 @@ class MLTrader(tpqoa.tpqoa):
         self.bootstrap_history()
 
     def bootstrap_history(self):
-        warmup_bars = max(250, 150 + self.lookback + self.window)
-        bar_seconds = int(self.bar_length.total_seconds())
-
-        now_local = datetime.now(TRADING_TIMEZONE).replace(second=0, microsecond=0)
-        now_epoch = int(now_local.timestamp())
-        aligned_local_epoch = now_epoch - (now_epoch % bar_seconds)
-        aligned_local = datetime.fromtimestamp(aligned_local_epoch, tz=TRADING_TIMEZONE)
-
-        aligned_end_utc = aligned_local.astimezone(timezone.utc)
-        start_utc = aligned_end_utc - timedelta(seconds=warmup_bars * bar_seconds)
-
-        # Use naive UTC datetimes for tpqoa/OANDA request formatting compatibility.
-        aligned_end = aligned_end_utc.replace(tzinfo=None)
-        start = start_utc.replace(tzinfo=None)
-
+        # Request completed bars via count-based OANDA v20 call.
+        # This avoids the 'to is in the future' 400 error from time-range requests.
+        warmup_bars = max(350, 160 + self.lookback + self.window)
         try:
-            history = self.get_history(
-                instrument=self.instrument,
-                start=start,
-                end=aligned_end,
-                granularity=self.granularity,
+            resp = self.ctx.instrument.candles(
+                self.instrument,
                 price="M",
+                granularity=self.granularity,
+                count=warmup_bars,
             )
+            if resp.status != 200:
+                print(f"History bootstrap HTTP {resp.status}: {resp.body}")
+                return
+            raw_candles = resp.body.get("candles", [])
         except Exception as exc:
             print(f"History bootstrap failed: {exc}")
             return
 
-        if history is None or history.empty:
+        rows = []
+        for c in raw_candles:
+            if not c.complete:
+                continue
+            rows.append({
+                "time":          pd.to_datetime(c.time, utc=True).tz_convert(TRADING_TIMEZONE),
+                self.instrument: float(c.mid.c),
+            })
+
+        if not rows:
+            print("History bootstrap: no completed bars returned.")
             return
 
-        history = history.rename(columns={"c": self.instrument})[[self.instrument]].dropna()
-        history.index = pd.to_datetime(history.index, utc=True).tz_convert(TRADING_TIMEZONE)
+        history = pd.DataFrame(rows).set_index("time")
         self.raw_data = history.copy()
-        self.last_bar = pd.Timestamp(aligned_local)
+        bar_seconds = int(self.bar_length.total_seconds())
+        last_ts = history.index[-1]
+        # Align last_bar to the most recent completed bar boundary
+        self.last_bar = pd.Timestamp(last_ts)
     
     def on_success(self, time, bid, ask):
         print(self.ticks, end = " ",flush=True)
@@ -253,11 +187,8 @@ class MLTrader(tpqoa.tpqoa):
         prediction  = float(self.model.predict(sequence[np.newaxis, ...], verbose=0).reshape(-1)[0])
         lstm_signal = (prediction - 0.5) * 2   # scale [0,1] → [-1,+1]
 
-        # ── News sentiment signal (time-decayed) ──────────────────────────────
-        news_signal, n_articles = get_news_signal()
-
-        # ── Weighted combination ──────────────────────────────────────────────
-        combined = LSTM_WEIGHT * lstm_signal + NEWS_WEIGHT * news_signal
+        # ── Weighted combination (LSTM-only) ─────────────────────────────────
+        combined = LSTM_WEIGHT * lstm_signal
 
         # Dead zone: if combined conviction is too low, stay flat
         if abs(combined) < MIN_CONFIDENCE:
@@ -274,15 +205,12 @@ class MLTrader(tpqoa.tpqoa):
         self._last_signal = {
             "lstm_prob":    prediction,
             "lstm_signal":  lstm_signal,
-            "news_signal":  news_signal,
-            "n_articles":   n_articles,
             "combined":     combined,
             "direction":    direction,
         }
 
         print(
             f"\nLSTM prob={prediction:.3f}  signal={lstm_signal:+.3f} | "
-            f"News score={news_signal:+.3f} ({n_articles} articles) | "
             f"Combined={combined:+.3f}  ->  {direction}"
         )
 
@@ -296,29 +224,55 @@ class MLTrader(tpqoa.tpqoa):
     def execute_trades(self):
         if self.data is None or self.data.empty:
             return
+
+        # ── Stop Loss / Take Profit check ─────────────────────────────────────
+        current_price = float(self.data["price"].iloc[-1])
+        if self.position != 0 and self.entry_price is not None:
+            ret = (current_price - self.entry_price) / self.entry_price * self.position
+            if ret <= -self.stop_loss:
+                close_units = -self.position * self.units
+                order = self.create_order(self.instrument, close_units, suppress=True, ret=True)
+                self.report_trade(order, f"STOP LOSS HIT (ret={ret*100:.2f}%)")
+                self.position   = 0
+                self.entry_price = None
+                return
+            elif ret >= self.take_profit:
+                close_units = -self.position * self.units
+                order = self.create_order(self.instrument, close_units, suppress=True, ret=True)
+                self.report_trade(order, f"TAKE PROFIT HIT (ret={ret*100:.2f}%)")
+                self.position   = 0
+                self.entry_price = None
+                return
+
         if self.data["position"].iloc[-1] == 1:
             if self.position == 0:
-                order = self.create_order(self.instrument, self.units, suppress = True, ret = True)
-                self.report_trade(order, "GOING LONG")  # NEW
+                order = self.create_order(self.instrument, self.units, suppress=True, ret=True)
+                self.report_trade(order, "GOING LONG")
+                self.entry_price = float(order["price"])
             elif self.position == -1:
-                order = self.create_order(self.instrument, self.units * 2, suppress = True, ret = True) 
-                self.report_trade(order, "GOING LONG")  # NEW
+                order = self.create_order(self.instrument, self.units * 2, suppress=True, ret=True)
+                self.report_trade(order, "GOING LONG")
+                self.entry_price = float(order["price"])
             self.position = 1
-        elif self.data["position"].iloc[-1] == -1: 
+        elif self.data["position"].iloc[-1] == -1:
             if self.position == 0:
-                order = self.create_order(self.instrument, -self.units, suppress = True, ret = True)
-                self.report_trade(order, "GOING SHORT")  # NEW
+                order = self.create_order(self.instrument, -self.units, suppress=True, ret=True)
+                self.report_trade(order, "GOING SHORT")
+                self.entry_price = float(order["price"])
             elif self.position == 1:
-                order = self.create_order(self.instrument, -self.units * 2, suppress = True, ret = True)
-                self.report_trade(order, "GOING SHORT")  # NEW
+                order = self.create_order(self.instrument, -self.units * 2, suppress=True, ret=True)
+                self.report_trade(order, "GOING SHORT")
+                self.entry_price = float(order["price"])
             self.position = -1
-        elif self.data["position"].iloc[-1] == 0: 
+        elif self.data["position"].iloc[-1] == 0:
             if self.position == -1:
-                order = self.create_order(self.instrument, self.units, suppress = True, ret = True) 
-                self.report_trade(order, "GOING NEUTRAL")  # NEW
+                order = self.create_order(self.instrument, self.units, suppress=True, ret=True)
+                self.report_trade(order, "GOING NEUTRAL")
+                self.entry_price = None
             elif self.position == 1:
-                order = self.create_order(self.instrument, -self.units, suppress = True, ret = True)
-                self.report_trade(order, "GOING NEUTRAL")  # NEW
+                order = self.create_order(self.instrument, -self.units, suppress=True, ret=True)
+                self.report_trade(order, "GOING NEUTRAL")
+                self.entry_price = None
             self.position = 0
             
     def report_trade(self, order, going):  # NEW
@@ -336,17 +290,13 @@ class MLTrader(tpqoa.tpqoa):
         sig = getattr(self, "_last_signal", None)
         if sig:
             lstm_conf   = abs(sig["lstm_signal"])   * 100   # 0-100 %
-            news_conf   = abs(sig["news_signal"])   * 100
             comb_conf   = abs(sig["combined"])      * 100
             print("  Trade taken at the following signal constraints:")
             print(f"    Price model (LSTM) : prob={sig['lstm_prob']:.4f}  |  "
-                  f"signal={sig['lstm_signal']:+.4f}  |  confidence={lstm_conf:.1f}%  "
-                  f"(weight {LSTM_WEIGHT*100:.0f}%)")
-            print(f"    News sentiment     : score={sig['news_signal']:+.4f}  |  "
-                  f"confidence={news_conf:.1f}%  |  "
-                  f"articles={sig['n_articles']}  (weight {NEWS_WEIGHT*100:.0f}%)")
+                f"signal={sig['lstm_signal']:+.4f}  |  confidence={lstm_conf:.1f}%  "
+                f"(weight {LSTM_WEIGHT*100:.0f}%)")
             print(f"    Combined signal    : {sig['combined']:+.4f}  |  "
-                  f"final confidence={comb_conf:.1f}%  |  direction={sig['direction']}")
+                f"final confidence={comb_conf:.1f}%  |  direction={sig['direction']}")
         print(100 * "-" + "\n")
 
 if __name__ == "__main__":
@@ -355,10 +305,12 @@ if __name__ == "__main__":
     trader = MLTrader(
         config_file=str(BASE_DIR / "src" / "oanda.cfg"),
         instrument="EUR_USD",
-        bar_length="15min",
+        bar_length="1min",  # ← TESTING: change back to "15min" for production
         units=100000,
         model=model, mean=mean, std=std,
-        feature_cols=feature_cols, lookback=lookback, window=window
+        feature_cols=feature_cols, lookback=lookback, window=window,
+        stop_loss=0.005,    # 0.5 % stop loss
+        take_profit=0.010,  # 1.0 % take profit
     )
 
     while True:
