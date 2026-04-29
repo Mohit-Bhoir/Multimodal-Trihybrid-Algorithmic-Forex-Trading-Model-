@@ -1,0 +1,39 @@
+# docker-compose.yml — Streamlit frontend service
+#
+# Secrets and data are NEVER baked into the image.
+# They are bind-mounted from the host at runtime:
+#   ./src/oanda.cfg  → read-only OANDA credentials
+#   ./models/        → read-only LSTM model artifacts
+#   ./data/backtest/ → read-write (shared with Airflow via host path)
+#
+# Usage:
+#   docker compose up --build -d      # first run / after code changes
+#   docker compose up -d              # subsequent starts
+#   docker compose down               # stop
+
+services:
+  streamlit:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    image: dissertation-streamlit:latest
+    container_name: dissertation_streamlit
+    ports:
+      - "8501:8501"
+    volumes:
+      # Live backtest data — written by Airflow, read by Streamlit
+      - ./data/backtest:/app/data/backtest
+      # LSTM model artifacts — read-only
+      - ./models:/app/models:ro
+      # OANDA credentials — read-only, never baked into image
+      - ./src/oanda.cfg:/app/src/oanda.cfg:ro
+      # Streamlit theme / server config
+      - ./.streamlit:/app/.streamlit:ro
+    env_file:
+      - .env
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3

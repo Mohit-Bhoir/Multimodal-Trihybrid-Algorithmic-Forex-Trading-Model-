@@ -1,0 +1,29 @@
+# docker-compose.override.yml — extra bind-mounts for Astro Airflow containers
+#
+# Astro CLI merges this file with its internal docker-compose automatically
+# when you run `astro dev start`. No manual steps needed.
+#
+# Inside the Airflow containers the project root is /usr/local/airflow, so:
+#   data/backtest/  → /usr/local/airflow/data/backtest/
+#   src/oanda.cfg   → /usr/local/airflow/src/oanda.cfg
+#
+# The scheduler writes to data/backtest/ on the host; Streamlit reads from
+# the same host path via its own docker-compose.yml volume mount.
+
+version: "3.0"
+
+services:
+  scheduler:
+    volumes:
+      - ./data/backtest:/usr/local/airflow/data/backtest
+      - ./src/oanda.cfg:/usr/local/airflow/src/oanda.cfg:ro
+
+  webserver:
+    volumes:
+      - ./data/backtest:/usr/local/airflow/data/backtest
+      - ./src/oanda.cfg:/usr/local/airflow/src/oanda.cfg:ro
+
+  triggerer:
+    volumes:
+      - ./data/backtest:/usr/local/airflow/data/backtest
+      - ./src/oanda.cfg:/usr/local/airflow/src/oanda.cfg:ro
