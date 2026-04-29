@@ -1,0 +1,4 @@
+# Frontend-specific packages (core ML/trading stack already in root requirements.txt)
+streamlit>=1.32.0
+streamlit-autorefresh>=1.0.1
+plotly>=5.18.0
