@@ -21,6 +21,7 @@ from utils.trading_engine import (
     get_account_info,
     get_bid_ask_price,
     get_current_price,
+    get_oanda_config_path,
     get_open_position,
     get_recent_trades,
     is_stream_running,
@@ -239,7 +240,7 @@ api = model = None
 _api_err = _model_err = None
 
 try:
-    api = _get_api(str(OANDA_CONFIG_PATH))
+    api = _get_api(get_oanda_config_path())
 except Exception as exc:
     _api_err = str(exc)
 

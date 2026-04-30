@@ -8,6 +8,5 @@ src/__pycache__/
 .dockerignore
 .strategies/
 __pycache__/
-data/backtest/forex_data_backtest.csv
 data/Data_check.ipynb
 data/backtest/forex_data_backtest.csv

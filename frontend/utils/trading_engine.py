@@ -39,6 +39,33 @@ BACKTEST_CSV = ROOT / "data" / "backtest" / "forex_data_backtest.csv"
 FEATURE_COLS = ["returns", "sma", "boll", "min", "max", "mom", "vol"]
 
 
+def get_oanda_config_path() -> str:
+    """Return path to a valid oanda.cfg.
+
+    - Local / Docker: uses the real file at src/oanda.cfg.
+    - Streamlit Community Cloud: writes a temp file from st.secrets so the
+      real cfg file never needs to be committed to the repo.
+    """
+    if OANDA_CONFIG_PATH.exists():
+        return str(OANDA_CONFIG_PATH)
+    # Cloud deployment — build config from st.secrets
+    import configparser
+    import tempfile
+    import streamlit as st
+    cfg = configparser.ConfigParser()
+    cfg["oanda"] = {
+        "account_id":   st.secrets["oanda"]["account_id"],
+        "access_token": st.secrets["oanda"]["access_token"],
+        "account_type": st.secrets["oanda"]["account_type"],
+    }
+    tmp = tempfile.NamedTemporaryFile(
+        mode="w", suffix=".cfg", delete=False, prefix="oanda_"
+    )
+    cfg.write(tmp)
+    tmp.close()
+    return tmp.name
+
+
 # ── Live tick streaming ────────────────────────────────────────────────────────
 # Thread-safe deque accumulates ticks from the OANDA streaming thread.
 # Streamlit drains it on each page refresh.
