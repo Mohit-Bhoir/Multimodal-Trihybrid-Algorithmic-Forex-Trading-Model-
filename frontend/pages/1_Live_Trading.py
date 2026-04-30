@@ -727,7 +727,7 @@ def _tick_feed():
         # Live 15-minute interval (last tick in each bucket)
         _live_15 = (
             _ph.set_index("time")[["price"]]
-               .resample("M15")
+               .resample("15min")
                .last()
                .dropna()
         )
