@@ -6,7 +6,6 @@ inspect equity curve / drawdown, trade log, and deploy to live.
 All times in British Summer Time (Europe/London).
 """
 
-import json
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -364,13 +363,43 @@ st.divider()
 _b1, _b2, _b3 = st.columns(3)
 
 with _b1:
-    if st.button("💾  Save Strategy", use_container_width=True):
-        _params    = _bt_store["params"]
-        _save_dir  = ROOT / "strategies"
-        _save_dir.mkdir(exist_ok=True)
-        _fname     = _save_dir / f"strategy_{datetime.now(BST_TZ).strftime('%Y%m%d_%H%M%S')}.json"
-        _fname.write_text(json.dumps(_params, indent=2))
-        st.success(f"Strategy saved → `{_fname.relative_to(ROOT)}`")
+    _p = _bt_store["params"]
+    _m = metrics
+    _report_lines = [
+        "EUR/USD LSTM Strategy Report",
+        "=" * 40,
+        f"Date Range : {_p.get('start_date','?')}  →  {_p.get('end_date','?')}",
+        "",
+        "--- Parameters ---",
+        f"Long Threshold  : {_p.get('long_threshold', '?'):.2f}",
+        f"Short Threshold : {_p.get('short_threshold', '?'):.2f}",
+        f"Stop Loss       : {_p.get('stop_loss', 0)*100:.2f}%",
+        f"Take Profit     : {_p.get('take_profit', 0)*100:.2f}%",
+        f"Starting Capital: £{_p.get('capital', 0):,.2f}",
+        "",
+        "--- Performance Metrics ---",
+        f"Total Return    : {_m.get('total_return_pct', 0):+.2f}%",
+        f"Final NAV       : £{_m.get('final_nav', 0):,.2f}",
+        f"Sharpe Ratio    : {_m.get('sharpe', 0):.3f}",
+        f"Max Drawdown    : {_m.get('max_drawdown_pct', 0):.2f}%",
+        f"Trade Count     : {_m.get('trade_count', 0)}",
+        f"Win Rate        : {_m.get('win_rate_pct', 0):.1f}%",
+        f"Avg Win         : £{_m.get('avg_win', 0):+,.4f}",
+        f"Avg Loss        : £{_m.get('avg_loss', 0):+,.4f}",
+        f"SL Triggered    : {_m.get('sl_count', 0)}",
+        f"TP Triggered    : {_m.get('tp_count', 0)}",
+        "",
+        f"Generated       : {datetime.now(BST_TZ).strftime('%Y-%m-%d %H:%M:%S %Z')}",
+    ]
+    _report_text = "\n".join(_report_lines)
+    _fname = f"strategy_{datetime.now(BST_TZ).strftime('%Y%m%d_%H%M%S')}.txt"
+    st.download_button(
+        label="💾  Save Strategy",
+        data=_report_text,
+        file_name=_fname,
+        mime="text/plain",
+        use_container_width=True,
+    )
 
 with _b2:
     if st.button("🔄  Re-run Backtest", use_container_width=True):

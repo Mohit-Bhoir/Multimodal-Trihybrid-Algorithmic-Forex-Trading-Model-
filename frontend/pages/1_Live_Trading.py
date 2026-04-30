@@ -93,14 +93,20 @@ for _fk, _fv in [("slider_params", _DEFAULT_SLIDER_PARAMS.copy()),
 
 if "deploy_params" in st.session_state and st.session_state.get("deploy_params"):
     _dp = st.session_state.pop("deploy_params")
-    # Merge deploy params into persistent slider values
-    for _k in ("long_threshold", "short_threshold", "stop_loss", "take_profit"):
+    # Probability thresholds arrive as-is (0–1 fractions)
+    for _k in ("long_threshold", "short_threshold"):
         if _k in _dp:
             _app["slider_params"][_k] = float(_dp[_k])
+    # Risk params: backtest stores fractions (e.g. 0.001), live uses percentages (e.g. 0.10)
+    for _k in ("stop_loss", "take_profit"):
+        if _k in _dp:
+            _app["slider_params"][_k] = float(_dp[_k]) * 100
     st.success(
         f"Deployed from Backtest — "
-        f"long_thr={_app['slider_params']['long_threshold']}, "
-        f"short_thr={_app['slider_params']['short_threshold']}",
+        f"long_thr={_app['slider_params']['long_threshold']:.2f}, "
+        f"short_thr={_app['slider_params']['short_threshold']:.2f}, "
+        f"SL={_app['slider_params']['stop_loss']:.2f}%, "
+        f"TP={_app['slider_params']['take_profit']:.2f}%",
         icon="🚀",
     )
 
