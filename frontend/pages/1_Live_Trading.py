@@ -384,7 +384,7 @@ if api:
     start_tick_stream(api, INSTRUMENT)
 
 if model:
-    bars = fetch_recent_bars(api, INSTRUMENT, lookback, window, granularity="M1")  # ← TESTING: change back to "M15" for production
+    bars = fetch_recent_bars(api, INSTRUMENT, lookback, window, granularity="15min")  # ← TESTING: change back to "M15" for production
     if not bars.empty:
         # Apply frozen-regime threshold adjustment before computing the signal.
         _eff_long, _eff_short = _effective_thresholds(

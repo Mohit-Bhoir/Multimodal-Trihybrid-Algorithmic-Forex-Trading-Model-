@@ -305,7 +305,7 @@ if __name__ == "__main__":
     trader = MLTrader(
         config_file=str(BASE_DIR / "src" / "oanda.cfg"),
         instrument="EUR_USD",
-        bar_length="1min",  # ← TESTING: change back to "15min" for production
+        bar_length="15min",  # ← TESTING: change back to "15min" for production
         units=100000,
         model=model, mean=mean, std=std,
         feature_cols=feature_cols, lookback=lookback, window=window,
