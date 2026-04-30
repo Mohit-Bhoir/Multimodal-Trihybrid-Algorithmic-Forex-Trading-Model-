@@ -590,7 +590,7 @@ def _prediction_feed():
         # Apply frozen-regime offset so prediction uses the same thresholds as execution
         _lt, _st = _effective_thresholds(_base_long, _base_short, _app.get("frozen_regime"))
 
-        _bars = fetch_recent_bars(api, INSTRUMENT, lookback, window, granularity="M1")
+        _bars = fetch_recent_bars(api, INSTRUMENT, lookback, window, granularity="15min")
         if _bars.empty:
             st.warning("Waiting for M1 bars\u2026", icon="\u23f3")
             return

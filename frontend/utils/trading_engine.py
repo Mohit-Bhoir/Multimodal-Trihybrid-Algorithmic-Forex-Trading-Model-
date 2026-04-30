@@ -176,7 +176,7 @@ def generate_features(data: pd.DataFrame, window: int = 20) -> pd.DataFrame:
 # ── OANDA helpers ──────────────────────────────────────────────────────────────
 
 def fetch_recent_bars(api, instrument: str, lookback: int, window: int,
-                      granularity: str = "M15") -> pd.DataFrame:
+                      granularity: str = "15min") -> pd.DataFrame:
     """Fetch enough completed historical bars for feature generation + LSTM lookback.
 
     Uses a count-based OANDA v20 candles request (avoids the 'to is in the
