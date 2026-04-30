@@ -9,4 +9,3 @@ src/__pycache__/
 .strategies/
 __pycache__/
 data/Data_check.ipynb
-data/backtest/forex_data_backtest.csv
