@@ -156,9 +156,9 @@ def _effective_thresholds(
     """
     regime = (frozen_regime or {}).get("regime", "NORMAL")
     if regime == "HIGH":
-        return min(base_long + 0.03, 1.0), max(base_short - 0.03, 0.0)
+        return min(base_long + 0.02, 1.0), max(base_short - 0.03, 0.0)
     if regime == "LOW":
-        return max(base_long - 0.03, 0.50), min(base_short + 0.03, 0.50)
+        return max(base_long - 0.02, 0.50), min(base_short + 0.02, 0.50)
     return base_long, base_short
 
 if "deploy_params" in st.session_state and st.session_state.get("deploy_params"):
