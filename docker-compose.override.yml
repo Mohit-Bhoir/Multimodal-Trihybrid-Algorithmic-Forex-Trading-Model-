@@ -1,24 +1,28 @@
 # docker-compose.override.yml — extra bind-mounts for Astro Airflow containers
 #
-# Astro CLI merges this file with its internal docker-compose automatically
-# when you run `astro dev start`. No manual steps needed.
+# Astro CLI merges this file automatically when you run `astro dev start`.
+# Docker Compose does NOT use this file when running the Streamlit service
+# (use `docker compose -f docker-compose.streamlit.yml up --build -d` instead).
 #
 # Inside the Airflow containers the project root is /usr/local/airflow, so:
 #   data/backtest/  → /usr/local/airflow/data/backtest/
 #   src/oanda.cfg   → /usr/local/airflow/src/oanda.cfg
-#
-# The scheduler writes to data/backtest/ on the host; Streamlit reads from
-# the same host path via its own docker-compose.yml volume mount.
-
-version: "3.0"
 
 services:
-  scheduler:
+  # Remap Airflow webserver from 8080 → 8082 (8080 is used by Docker Desktop)
+  webserver:
+    ports:
+      - "8082:8080"
     volumes:
       - ./data/backtest:/usr/local/airflow/data/backtest
       - ./src/oanda.cfg:/usr/local/airflow/src/oanda.cfg:ro
 
-  webserver:
+  # Do NOT expose Postgres on the host — Airflow containers use the
+  # internal Docker network. This avoids conflict with port 5432.
+  postgres:
+    ports: []
+
+  scheduler:
     volumes:
       - ./data/backtest:/usr/local/airflow/data/backtest
       - ./src/oanda.cfg:/usr/local/airflow/src/oanda.cfg:ro
@@ -27,3 +31,4 @@ services:
     volumes:
       - ./data/backtest:/usr/local/airflow/data/backtest
       - ./src/oanda.cfg:/usr/local/airflow/src/oanda.cfg:ro
+

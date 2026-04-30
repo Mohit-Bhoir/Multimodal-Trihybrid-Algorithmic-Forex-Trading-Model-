@@ -65,11 +65,12 @@ def fetch_new_bars():
             price=price_type,
         )
         records = {}
+        _attr = {"M": "mid", "B": "bid", "A": "ask"}[price_type]
         for c in resp.body["candles"]:
             if not c.complete:
                 continue
             ts = pd.Timestamp(c.time).tz_localize(None)  # UTC naive, matches existing data
-            candle = getattr(c, price_type.lower())
+            candle = getattr(c, _attr)
             records[ts] = float(candle.c)
         return pd.Series(records, name=price_type)
 

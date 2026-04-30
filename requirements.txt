@@ -1,38 +1,9 @@
-# Core data / ML
+# Airflow DAG runtime dependencies
+# Astro CLI installs this file automatically into the Airflow Docker image.
+# Keep minimal — only what dags/daily_data_refresh.py needs at runtime.
+#
+# Full ML/training stack is in requirements-ml.txt (local use only).
+
 numpy<2
 pandas
-scikit-learn
-joblib
-pyyaml
-
-# Model training / tracking
-tensorflow==2.10.0
-tensorflow-intel==2.10.0
-protobuf==3.20.3
-mlflow
-python-dotenv
-
-# Trading API
 tpqoax
-
-# Pipeline / experiment tooling
-dvc[s3]
-dagshub
-
-#News data
-vaderSentiment
-urllib
-transformers
-tokenizers
-blob
-textblob
-regex   
-requests
-nltk
-networkx
-jinja2  
-idna
-huggingface-hub
-feedparser
-beautifulsoup4
-torch

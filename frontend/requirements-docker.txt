@@ -9,8 +9,8 @@ plotly>=5.18.0
 pandas
 numpy<2
 
-# ML inference (must match the version the model was trained with)
-tensorflow==2.10.0
+# ML inference — must exactly match the version the model was trained with
+tensorflow==2.21.0
 
 # Trading API
 tpqoax
