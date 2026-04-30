@@ -15,6 +15,9 @@ services:
       - "8082:8080"
     volumes:
       - ./data/backtest:/usr/local/airflow/data/backtest
+      - ./data/processed:/usr/local/airflow/data/processed
+      - ./data/retrain_staging:/usr/local/airflow/data/retrain_staging
+      - ./models:/usr/local/airflow/models
       - ./src/oanda.cfg:/usr/local/airflow/src/oanda.cfg:ro
 
   # Do NOT expose Postgres on the host — Airflow containers use the
@@ -25,10 +28,16 @@ services:
   scheduler:
     volumes:
       - ./data/backtest:/usr/local/airflow/data/backtest
+      - ./data/processed:/usr/local/airflow/data/processed
+      - ./data/retrain_staging:/usr/local/airflow/data/retrain_staging
+      - ./models:/usr/local/airflow/models
       - ./src/oanda.cfg:/usr/local/airflow/src/oanda.cfg:ro
 
   triggerer:
     volumes:
       - ./data/backtest:/usr/local/airflow/data/backtest
+      - ./data/processed:/usr/local/airflow/data/processed
+      - ./data/retrain_staging:/usr/local/airflow/data/retrain_staging
+      - ./models:/usr/local/airflow/models
       - ./src/oanda.cfg:/usr/local/airflow/src/oanda.cfg:ro
 

@@ -1,9 +1,17 @@
 # Airflow DAG runtime dependencies
 # Astro CLI installs this file automatically into the Airflow Docker image.
-# Keep minimal — only what dags/daily_data_refresh.py needs at runtime.
 #
-# Full ML/training stack is in requirements-ml.txt (local use only).
+# daily_data_refresh  — needs: tpqoax, pandas, numpy
+# retrain_lstm        — additionally needs: tensorflow, scikit-learn, pyyaml
 
 numpy<2
 pandas
 tpqoax
+
+# ── retrain_lstm DAG ─────────────────────────────────────────────────────────
+# tensorflow and scikit-learn are NOT installed here — they conflict with
+# Airflow's opentelemetry-proto (protobuf<5 vs TF >=2.21 protobuf>=6.31.1).
+# Those packages are installed in an isolated task-level virtualenv by
+# PythonVirtualenvOperator (see dags/retrain_lstm.py).
+pyyaml
+python-dotenv
