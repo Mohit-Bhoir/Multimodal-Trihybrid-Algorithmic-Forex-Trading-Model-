@@ -598,7 +598,17 @@ def _prediction_feed():
         _sig  = predict_signal(model, mean, std, feature_cols, lookback, window, _bars, _lt, _st)
         _prob = _sig.get("prob")
         _dir  = _sig.get("direction", "FLAT")
-        _bar_ts = str(_bars.index[-1])[:16]
+        
+        _bar_start = _bars.index[-1]
+        _bar_end = _bar_start + pd.Timedelta(minutes=15)
+        _bar_ts = _bar_end.strftime("%Y-%m-%d %H:%M")
+        
+        _app["decision_log"].append({
+        "bar_start": _bar_start.strftime("%Y-%m-%d %H:%M"),
+        "bar_end": _bar_end.strftime("%Y-%m-%d %H:%M"),
+        "prob": round(float(_prob), 4) if _prob is not None else None,
+        "direction": _dir,
+         })
 
         # Persist for auto-trade + portfolio metric
         _app["latest_signal"]     = _sig
