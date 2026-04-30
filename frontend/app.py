@@ -5,11 +5,12 @@ Run with:   streamlit run frontend/app.py
 """
 import logging
 import os
-from pathlib import Path
-from zoneinfo import ZoneInfo
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import streamlit as st
+
+from utils.ui import inject_page_chrome, render_disclaimer, render_footer
 
 # ── Suppress noisy log spam ────────────────────────────────────────────────────
 # TF / oneDNN warnings (must be set before tensorflow is imported anywhere)
@@ -29,6 +30,7 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+inject_page_chrome()
 
 # ── Header ─────────────────────────────────────────────────────────────────────
 st.title("💹 EUR/USD LSTM Algorithmic Trading System")
@@ -36,6 +38,7 @@ st.caption(
     f"🕐 {datetime.now(BST_TZ).strftime('%d %b %Y  %H:%M:%S')} BST  |  "
     "All times displayed in British Summer Time (Europe/London)"
 )
+render_disclaimer()
 st.divider()
 
 # ── Navigation cards ───────────────────────────────────────────────────────────
@@ -91,3 +94,5 @@ st.markdown("""
 | **Broker** | OANDA v20 API via `tpqoa` (practice or live account) |
 | **Timezone** | British Summer Time — `Europe/London` (GMT in winter, BST+1 in summer) |
 """)
+
+render_footer()

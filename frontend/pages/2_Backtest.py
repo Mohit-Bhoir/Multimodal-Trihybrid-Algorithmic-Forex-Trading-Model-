@@ -25,6 +25,7 @@ from utils.trading_engine import (
     BST, BACKTEST_CSV,
     BacktestEngine, load_lstm_artifacts,
 )
+from utils.ui import inject_page_chrome, render_disclaimer, render_footer
 
 BST_TZ = ZoneInfo("Europe/London")
 
@@ -34,9 +35,11 @@ st.set_page_config(
     page_icon="🔬",
     layout="wide",
 )
+inject_page_chrome()
 
 st.title("🔬 Iterative Backtesting Engine")
 st.caption("Configure strategy parameters, run a simulation, then deploy to live trading.")
+render_disclaimer()
 
 # ── Load model (cached) ────────────────────────────────────────────────────────
 @st.cache_resource(show_spinner="Loading LSTM model…")
@@ -410,3 +413,5 @@ with _b3:
     if st.button("🚀  Deploy to Live", type="primary", use_container_width=True):
         st.session_state["deploy_params"] = _bt_store["params"]
         st.switch_page("pages/1_Live_Trading.py")
+
+render_footer()

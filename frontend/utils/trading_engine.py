@@ -415,6 +415,71 @@ def get_recent_trades(api, instrument: str, count: int = 30) -> list:
     return rows[:count]
 
 
+# ── Volatility Regime Detection ────────────────────────────────────────────────
+
+def get_volatility_regime(price_series: "pd.Series", window: int = 20) -> dict:
+    """Classify current volatility regime using rolling log-return std.
+
+    Compares the current rolling volatility against a 200-bar historical
+    distribution and returns a regime label plus diagnostic values.
+
+    Parameters
+    ----------
+    price_series : pd.Series
+        Time-ordered series of mid prices (at least ``window + 5`` values).
+    window : int
+        Rolling window for the std calculation (default 20 bars).
+
+    Returns
+    -------
+    dict with keys:
+        regime      – "HIGH" | "NORMAL" | "LOW" | "UNKNOWN"
+        vol         – current rolling vol (float or None)
+        percentile  – where current vol sits in recent history (0–100 or None)
+        label       – short human-readable label including emoji
+        color       – hex colour suitable for inline styling
+    """
+    if len(price_series) < window + 5:
+        return {
+            "regime":     "UNKNOWN",
+            "vol":        None,
+            "percentile": None,
+            "label":      "⬜ Unknown",
+            "color":      "#888888",
+        }
+
+    log_ret     = np.log(price_series / price_series.shift(1)).dropna()
+    rolling_vol = log_ret.rolling(window).std().dropna()
+
+    if rolling_vol.empty:
+        return {
+            "regime":     "UNKNOWN",
+            "vol":        None,
+            "percentile": None,
+            "label":      "⬜ Unknown",
+            "color":      "#888888",
+        }
+
+    current_vol = float(rolling_vol.iloc[-1])
+    hist_vols   = rolling_vol.tail(200)          # up-to 200-bar reference window
+    percentile  = float((hist_vols < current_vol).mean() * 100)
+
+    if percentile >= 75:
+        regime, label, color = "HIGH",   "🔴 High Volatility",   "#EF5350"
+    elif percentile >= 35:
+        regime, label, color = "NORMAL", "🟡 Normal Volatility", "#FFA726"
+    else:
+        regime, label, color = "LOW",    "🔵 Low Volatility",    "#42A5F5"
+
+    return {
+        "regime":     regime,
+        "vol":        current_vol,
+        "percentile": percentile,
+        "label":      label,
+        "color":      color,
+    }
+
+
 # ── Backtesting ────────────────────────────────────────────────────────────────
 
 class BacktestEngine:
