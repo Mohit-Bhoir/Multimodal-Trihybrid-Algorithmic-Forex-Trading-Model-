@@ -162,16 +162,28 @@ def _controls_unlocked() -> bool:
         return True
     return st.session_state.get("admin_pin_input", "") == str(required_pin)
 
+_WIDGET_KEY_MAP = {
+    "trade_units":     "live_trade_units",
+    "long_threshold":  "live_long_thr",
+    "short_threshold": "live_short_thr",
+    "stop_loss":       "live_sl_pct",
+    "take_profit":     "live_tp_pct",
+}
+
 if "deploy_params" in st.session_state and st.session_state.get("deploy_params"):
     _dp = st.session_state.pop("deploy_params")
     # Probability thresholds arrive as-is (0–1 fractions)
     for _k in ("long_threshold", "short_threshold"):
         if _k in _dp:
-            _app["slider_params"][_k] = float(_dp[_k])
+            _val = float(_dp[_k])
+            _app["slider_params"][_k] = _val
+            st.session_state[_WIDGET_KEY_MAP[_k]] = _val
     # Risk params: backtest stores fractions (e.g. 0.001), live uses percentages (e.g. 0.10)
     for _k in ("stop_loss", "take_profit"):
         if _k in _dp:
-            _app["slider_params"][_k] = float(_dp[_k]) * 100
+            _val = min(float(_dp[_k]) * 100.0, 5.0)
+            _app["slider_params"][_k] = _val
+            st.session_state[_WIDGET_KEY_MAP[_k]] = _val
     st.success(
         f"Deployed from Backtest — "
         f"long_thr={_app['slider_params']['long_threshold']:.2f}, "
@@ -180,6 +192,15 @@ if "deploy_params" in st.session_state and st.session_state.get("deploy_params")
         f"TP={_app['slider_params']['take_profit']:.2f}%",
         icon="🚀",
     )
+
+# Ensure widget session keys are initialized from _app["slider_params"]
+for _pk, _wk in _WIDGET_KEY_MAP.items():
+    if _wk not in st.session_state:
+        st.session_state[_wk] = (
+            int(_app["slider_params"][_pk])
+            if _pk == "trade_units"
+            else float(_app["slider_params"][_pk])
+        )
 
 INSTRUMENT = "EUR_USD"
 
@@ -190,7 +211,7 @@ with st.sidebar:
     _ap     = _app["active_params"]   # locked snapshot (bot ON)
     trade_units = st.number_input(
         "Trade Units", min_value=1_000, max_value=10_000_000,
-        value=int(_ap["trade_units"] if _bot_on else _sp["trade_units"]),
+        key="live_trade_units",
         step=1_000, disabled=_bot_on,
     )
     if not _bot_on:
@@ -245,13 +266,13 @@ with st.sidebar:
     st.subheader("\U0001f3af Signal Thresholds")
     long_threshold = st.slider(
         "Long Threshold", min_value=0.50, max_value=1.00,
-        value=float(_ap["long_threshold"] if _bot_on else _sp["long_threshold"]),
+        key="live_long_thr",
         step=0.01, help="Model prob ≥ this → go LONG",
         disabled=_bot_on,
     )
     short_threshold = st.slider(
         "Short Threshold", min_value=0.00, max_value=0.50,
-        value=float(_ap["short_threshold"] if _bot_on else _sp["short_threshold"]),
+        key="live_short_thr",
         step=0.01, help="Model prob ≤ this → go SHORT",
         disabled=_bot_on,
     )
@@ -283,14 +304,14 @@ with st.sidebar:
     st.subheader("\U0001f6e1\ufe0f Risk Management")
     stop_loss = st.slider(
         "Stop Loss (%)", min_value=0.10, max_value=5.00,
-        value=float(_ap["stop_loss"] if _bot_on else _sp["stop_loss"]),
+        key="live_sl_pct",
         step=0.10,
         help="Auto-close position when loss reaches this % of entry price.",
         disabled=_bot_on,
     )
     take_profit = st.slider(
         "Take Profit (%)", min_value=0.10, max_value=5.00,
-        value=min(float(_ap["take_profit"] if _bot_on else _sp["take_profit"]), 5.00),
+        key="live_tp_pct",
         step=0.10,
         help="Auto-close position when gain reaches this % of entry price.",
         disabled=_bot_on,
