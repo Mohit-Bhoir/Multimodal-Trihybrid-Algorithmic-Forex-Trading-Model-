@@ -6,6 +6,7 @@ Run with:   streamlit run frontend/app.py
 import logging
 import os
 from datetime import datetime
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import streamlit as st
@@ -22,7 +23,26 @@ os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
 logging.getLogger("tornado.application").setLevel(logging.CRITICAL)
 logging.getLogger("tornado.access").setLevel(logging.ERROR)
 
-BST_TZ = ZoneInfo("Europe/London")
+LONDON_TZ = ZoneInfo("Europe/London")
+ROOT = Path(__file__).resolve().parent.parent
+BACKTEST_CSV = ROOT / "data" / "backtest" / "forex_data_backtest.csv"
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _dataset_span() -> tuple[str, str, int]:
+    """Read first/last timestamp and row count of the backtest CSV."""
+    if not BACKTEST_CSV.exists():
+        return ("N/A", "N/A", 0)
+    try:
+        lines = BACKTEST_CSV.read_text(encoding="utf-8", errors="ignore").splitlines()
+        if len(lines) < 2:
+            return ("N/A", "N/A", 0)
+        first_ts = lines[1].split(",")[0][:10]
+        last_ts = lines[-1].split(",")[0][:10]
+        return (first_ts, last_ts, len(lines) - 1)
+    except Exception:
+        return ("N/A", "N/A", 0)
+
 
 st.set_page_config(
     page_title="EUR/USD LSTM Trading System",
@@ -33,10 +53,14 @@ st.set_page_config(
 inject_page_chrome()
 
 # ── Header ─────────────────────────────────────────────────────────────────────
+_now_london = datetime.now(LONDON_TZ)
+_tz_abbr = _now_london.strftime("%Z")
+_ds_start, _ds_end, _ds_rows = _dataset_span()
+
 st.title("💹 EUR/USD LSTM Algorithmic Trading System")
 st.caption(
-    f"🕐 {datetime.now(BST_TZ).strftime('%d %b %Y  %H:%M:%S')} BST  |  "
-    "All times displayed in British Summer Time (Europe/London)"
+    f"🕐 {_now_london.strftime('%d %b %Y  %H:%M:%S')} {_tz_abbr}  |  "
+    "All times displayed in Europe/London (GMT in winter, BST in summer)"
 )
 render_disclaimer()
 st.divider()
@@ -48,35 +72,36 @@ with col1:
     st.markdown("""
 ### 📈 Live Trading Simulation
 
-Connect to the **OANDA v20 API** and run the LSTM model in real time.
+Connect to the **OANDA v20 Practice API** and run the LSTM model in real time.
 
 | What you see | What you can do |
 |---|---|
-| Live EUR/USD price & M15 bar close time | Enable **auto-execute** trades |
+| Live EUR/USD price & M15 bar close time | Enable **auto-execute** demo trades |
 | Current position (Long / Short / Flat) | **Manually close** any open position |
-| Portfolio NAV, P&L & bid/ask spread | Tune min-confidence threshold |
-| LSTM model probability | Review full trade & decision logs |
-| **Volatility regime** (Low / Medium / High) | Observe regime-aware signal context |
+| Portfolio NAV, P&L & bid/ask spread (pips) | Tune Long / Short probability thresholds |
+| LSTM probability & session decision log | Configure Stop Loss & Take Profit (%) |
+| **Volatility regime** (Low / Normal / High) | Observe regime-adjusted signal bounds |
 
-> Auto-refreshes every **15 seconds** via OANDA REST polling.
+> Auto-refreshes every **15 seconds** with live OANDA streaming ticks.
 """)
     if st.button("📈  Open Live Trading", use_container_width=True, type="primary"):
         st.switch_page("pages/1_Live_Trading.py")
 
 with col2:
-    st.markdown("""
+    st.markdown(f"""
 ### 🔬 Iterative Backtesting Engine
 
-Simulate the strategy on **historical M15 EUR/USD data** before going live.
+Simulate the LSTM strategy on **historical M15 EUR/USD data** before going live.
 
 | Inputs | Outputs |
 |---|---|
-| Date range | Equity curve & drawdown chart |
-| Long / Short thresholds | Total return, Sharpe, max drawdown |
-| **Stop-loss & take-profit** (pip-calibrated) | Win rate & trade count |
-| Feature window & actual per-bar spread | Full trade log with P&L |
+| Date range (defaults to out-of-sample) | Mark-to-market equity & drawdown chart |
+| Long / Short probability thresholds | Total return, Sharpe & max drawdown |
+| **Stop-loss & take-profit** (% of entry) | Win rate, reward/risk & SL/TP counts |
+| Starting capital (£ simulated notional) | Full trade log with per-bar spread |
+| Dataset: `{_ds_start}` → `{_ds_end}` | `{_ds_rows:,}` M15 bars (OOS from `2026-01-09`) |
 
-> Results can be **saved as JSON** or **deployed directly to Live Trading**.
+> Results can be **exported as JSON** or **deployed directly to Live Trading**.
 """)
     if st.button("🔬  Open Backtest Engine", use_container_width=True):
         st.switch_page("pages/2_Backtest.py")
@@ -84,17 +109,21 @@ Simulate the strategy on **historical M15 EUR/USD data** before going live.
 st.divider()
 
 # ── ML Pipeline card ───────────────────────────────────────────────────────────
-st.markdown("### ⚙️ Automated ML Pipeline")
+st.markdown("### ⚙️ MLOps Pipeline *(Local Docker / Apache Airflow — Astro CLI)*")
+st.caption(
+    "The Airflow DAGs below run in the local Docker/Astronomer stack (`dags/`) rather than inside "
+    "Streamlit Community Cloud. This hosted demo serves the committed model and dataset snapshot "
+    f"(`{_ds_start}` → `{_ds_end}`)."
+)
 
 pipe_col1, pipe_col2 = st.columns(2, gap="large")
 
 with pipe_col1:
     st.markdown("""
-**Daily Data Refresh** *(Airflow DAG — Mon–Fri 22:00 UTC)*
+**Daily Data Refresh** *(`dags/daily_data_refresh.py` — Mon–Fri 22:00 UTC)*
 
-Fetches the latest M15 EUR/USD candles from OANDA via count-based API and
-appends them to the backtest CSV. Deduplicates and sorts automatically so
-the Backtest Engine always has up-to-date market data.
+Fetches the latest completed M15 EUR/USD candles from OANDA via the count-based
+API and appends them to the backtest CSV with timestamp deduplication.
 
 | Component | Detail |
 |---|---|
@@ -105,20 +134,18 @@ the Backtest Engine always has up-to-date market data.
 
 with pipe_col2:
     st.markdown("""
-**Weekly LSTM Retraining** *(Airflow DAG — Sunday 02:00 UTC)*
+**Weekly LSTM Retraining** *(`dags/retrain_lstm.py` — Sunday 02:00 UTC)*
 
-End-to-end retraining pipeline with hyperparameter grid search and
-walk-forward quality gating before the live model is replaced.
+End-to-end retraining DAG with `TimeSeriesSplit` hyperparameter grid search and
+4-window walk-forward quality gating before promoting a candidate model.
 
 | Stage | What happens |
 |---|---|
-| Fetch | Refresh training data from OANDA (skips if fresh) |
-| Preprocess | Train / test split — last 4 months held out |
-| Tune & Train | Grid search over units, dropout, LR, batch size |
-| Walk-Forward Backtest | 4-window iterative validation |
-| Quality Gate | Sharpe ≥ 0.3 · Max DD ≥ −25 % · Trades ≥ 20 |
-| Archive | Saves model, stats, metrics & params to `models/archive/` |
-| Promote | Overwrites live `lstm_model.h5` only on gate PASS |
+| Fetch & Split | Refresh training CSV & hold out last 4 months as test |
+| Tune & Train | Grid search over LSTM units, dropout, LR & batch size (isolated TF venv) |
+| Walk-Forward | 4-window contiguous-warmup backtest with spread & MTM equity |
+| Quality Gate | Avg Sharpe ≥ 0.3 · Worst DD ≥ −25% · Trades ≥ 20 |
+| Archive & Promote | Archives artifacts locally and promotes `lstm_model.h5` on PASS |
 """)
 
 st.divider()
@@ -129,16 +156,15 @@ st.markdown("""
 
 | Component | Detail |
 |---|---|
-| **Model** | LSTM neural network — binary classifier (price up/down) on M15 EUR/USD |
-| **Signal** | LSTM probability scaled to \[-1, +1\]; trades when \|signal\| > min-confidence |
-| **Features** | Log-returns, SMA cross, Bollinger, min/max, momentum, volatility (7 features) |
-| **Risk controls** | Per-trade stop-loss & take-profit; configurable in both live and backtest modes |
-| **Volatility regime** | Rolling ATR classified as Low / Medium / High; displayed on Live Trading page |
-| **Bar timing** | M15 bar **close** time displayed (bar start + 15 min) for precise signal attribution |
-| **Retraining** | Weekly Airflow DAG — grid search → walk-forward backtest → quality gate → archive |
-| **Broker** | OANDA v20 API via `tpqoa` (practice or live account) |
-| **Orchestration** | Apache Airflow 2.10 on Astronomer (Astro CLI / Docker) |
-| **Timezone** | British Summer Time — `Europe/London` (GMT in winter, BST+1 in summer) |
+| **Scope** | Phase 1 unimodal price-action LSTM trading & backtesting platform *(experimental NLP sentiment script in `src/news.py` is not yet fused into live signals)* |
+| **Model** | 2-layer LSTM binary directional classifier (up/down) on M15 EUR/USD, 50-bar lookback |
+| **Features (7)** | `returns`, `sma` (20 vs 150), `boll` (20-bar z-score), `min`, `max`, `mom` (3-bar), `vol` (20-bar) |
+| **Signal Rule** | Go LONG if `prob ≥ long_threshold`; go SHORT if `prob ≤ short_threshold`; otherwise FLAT |
+| **Volatility Regime** | 20-bar rolling M15 log-return std percentile (200-bar window) → Low / Normal / High; symmetrically widens/narrows live thresholds |
+| **Risk Controls** | Per-trade Stop Loss & Take Profit (% of entry price); per-bar bid-ask spread applied on all backtest closes |
+| **Broker** | OANDA v20 Practice (Demo) API via `tpqoa` (REST + live tick stream) |
+| **Orchestration** | Apache Airflow on Astronomer (Astro CLI / Docker, local stack) + MLflow experiment tracking |
+| **Timezone** | `Europe/London` — automatically displays GMT (UTC+0) in winter and BST (UTC+1) in summer |
 """)
 
 render_footer()
