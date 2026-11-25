@@ -111,55 +111,58 @@ _DEFAULT_SLIDER_PARAMS = {
     "trade_units":     100_000,
 }
 
-# ── Persistent app state (survives hard page refreshes & reconnections) ────────
-@st.cache_resource
+# ── Per-session app state (isolated per visitor; never shared across users) ────
 def _get_app_state() -> dict:
-    return {
-        "auto_trade":        False,
-        "trade_log":         [],
-        "decision_log":      [],
-        "price_history":     [],
-        "tick_log":          [],
-        "equity_history":    [],
-        "last_decision_bar": None,
-        "latest_signal":     {},   # most recent predict_signal result
-        # Slider values persisted across page navigation
-        "slider_params":     _DEFAULT_SLIDER_PARAMS.copy(),
-        # Snapshot locked in when bot starts (used for trade execution)
-        "active_params":     _DEFAULT_SLIDER_PARAMS.copy(),
-        # Volatility regime frozen at each M15 candle boundary
-        "frozen_regime":     None,   # dict from get_volatility_regime() or None
-        "last_candle_bar":   None,   # M15 boundary string "YYYY-MM-DD HH:MM"
-    }
+    if "live_app_state" not in st.session_state:
+        st.session_state["live_app_state"] = {
+            "auto_trade":              False,
+            "trade_log":               [],
+            "decision_log":            [],
+            "price_history":           [],
+            "tick_log":                [],
+            "equity_history":          [],
+            "last_decision_bar":       None,
+            "last_decision_bar_logged": None,
+            "last_pred_updated":       None,
+            "latest_signal":           {},
+            "slider_params":           _DEFAULT_SLIDER_PARAMS.copy(),
+            "active_params":           _DEFAULT_SLIDER_PARAMS.copy(),
+            "frozen_regime":           None,
+            "last_candle_bar":         None,
+            "last_m15_hist":           pd.DataFrame(),
+            "last_rest_poll_ts":       0.0,
+        }
+    return st.session_state["live_app_state"]
 
 _app = _get_app_state()
-# Back-compat: add new keys if running against an older cached state
-for _fk, _fv in [("slider_params", _DEFAULT_SLIDER_PARAMS.copy()),
-                  ("active_params",  _DEFAULT_SLIDER_PARAMS.copy()),
-                  ("latest_signal",  {}),
-                  ("last_pred_updated", None),
-                  ("last_decision_bar_logged", None),
-                  ("frozen_regime", None),
-                  ("last_candle_bar", None)]:
-    if _fk not in _app:
-        _app[_fk] = _fv
 
 
 def _effective_thresholds(
     base_long: float, base_short: float, frozen_regime: dict | None
 ) -> tuple[float, float]:
-    """Return (long_thr, short_thr) adjusted by the frozen volatility regime.
+    """Return (long_thr, short_thr) symmetrically adjusted by the frozen volatility regime.
 
-    HIGH volatility → raise the bar (require stronger signal to trade).
-    LOW  volatility → lower the bar (trade on weaker signal).
+    HIGH volatility → widen dead-zone (+0.02 / -0.02) to require stronger conviction.
+    LOW  volatility → narrow dead-zone (-0.02 / +0.02) within [0.50, 0.50] bounds.
     NORMAL / UNKNOWN → use base values unchanged.
     """
     regime = (frozen_regime or {}).get("regime", "NORMAL")
     if regime == "HIGH":
-        return min(base_long + 0.02, 1.0), max(base_short - 0.03, 0.0)
+        return min(base_long + 0.02, 1.0), max(base_short - 0.02, 0.0)
     if regime == "LOW":
         return max(base_long - 0.02, 0.50), min(base_short + 0.02, 0.50)
     return base_long, base_short
+
+
+def _controls_unlocked() -> bool:
+    """If [admin] pin is set in st.secrets, require PIN entry before live order actions."""
+    try:
+        required_pin = st.secrets.get("admin", {}).get("pin", "")
+    except Exception:
+        required_pin = ""
+    if not required_pin:
+        return True
+    return st.session_state.get("admin_pin_input", "") == str(required_pin)
 
 if "deploy_params" in st.session_state and st.session_state.get("deploy_params"):
     _dp = st.session_state.pop("deploy_params")
@@ -190,15 +193,24 @@ with st.sidebar:
     trade_units = st.number_input(
         "Trade Units", min_value=1_000, max_value=10_000_000,
         value=int(_ap["trade_units"] if _bot_on else _sp["trade_units"]),
-        step=10_000, disabled=_bot_on,
+        step=1_000, disabled=_bot_on,
     )
     if not _bot_on:
         _sp["trade_units"] = trade_units
     st.divider()
+    # ── Optional PIN gate for live OANDA demo order controls ──────────────
+    try:
+        _has_pin = bool(st.secrets.get("admin", {}).get("pin", ""))
+    except Exception:
+        _has_pin = False
+    if _has_pin:
+        st.text_input("🔐 Execution PIN", type="password", key="admin_pin_input",
+                      help="Required to start/stop the bot or close OANDA positions.")
+    _unlocked = _controls_unlocked()
     # ── Bot ON / OFF ──────────────────────────────────────────────────────
     st.subheader("\U0001f916 Auto Trading Bot")
     _bot_label = "Bot: ON \U0001f7e2" if _app["auto_trade"] else "Bot: OFF \U0001f534"
-    if st.button(_bot_label, use_container_width=True):
+    if st.button(_bot_label, use_container_width=True, disabled=not _unlocked):
         _new_bot_state = not _app["auto_trade"]
         _app["auto_trade"] = _new_bot_state
         if _new_bot_state:   # turning ON — snapshot current slider values as active params
@@ -221,8 +233,11 @@ with st.sidebar:
     # ── Close Position button (sidebar) ───────────────────────────────────
     _close_btn = st.button(
         "\U0001f6d1 Close All Positions", use_container_width=True,
+        disabled=not _unlocked,
         help="Immediately close any open OANDA position."
     )
+    if _has_pin and not _unlocked:
+        st.caption("🔒 Read-only observer mode. Enter PIN above to enable order controls.")
     st.divider()
     if _bot_on:
         st.info(
@@ -276,8 +291,8 @@ with st.sidebar:
         disabled=_bot_on,
     )
     take_profit = st.slider(
-        "Take Profit (%)", min_value=0.10, max_value=10.00,
-        value=float(_ap["take_profit"] if _bot_on else _sp["take_profit"]),
+        "Take Profit (%)", min_value=0.10, max_value=5.00,
+        value=min(float(_ap["take_profit"] if _bot_on else _sp["take_profit"]), 5.00),
         step=0.10,
         help="Auto-close position when gain reaches this % of entry price.",
         disabled=_bot_on,
@@ -312,13 +327,24 @@ def _get_model():
 
 
 @st.cache_data(ttl=30, show_spinner=False)
-def _get_recent_m15_history(_api, instrument: str, lookback_n: int, window_n: int) -> pd.DataFrame:
-    """Fetch approximately 1 day of completed M15 bars for chart context."""
+def _fetch_m15_bars_cached(_api, instrument: str, lookback_n: int, window_n: int) -> pd.DataFrame:
+    """Fetch completed M15 bars (raises on empty so empty frames are never cached)."""
     hist = fetch_recent_bars(_api, instrument, lookback_n, window_n, granularity="M15")
     if hist.empty:
-        return hist
-    hist = hist[["price"]].sort_index().tail(96).copy()  # 96 * 15m ≈ 1 day
-    return hist
+        raise ValueError("Empty M15 bar response from OANDA")
+    return hist.sort_index().copy()
+
+
+def _get_recent_m15_history(_api, instrument: str, lookback_n: int, window_n: int) -> pd.DataFrame:
+    """Return ~1 day of completed M15 bars, falling back to last known good history."""
+    try:
+        full = _fetch_m15_bars_cached(_api, instrument, lookback_n, window_n)
+        tail = full[["price"]].tail(96).copy()
+        _app["last_m15_hist"] = tail
+        return tail
+    except Exception:
+        cached = _app.get("last_m15_hist")
+        return cached if isinstance(cached, pd.DataFrame) and not cached.empty else pd.DataFrame()
 
 
 api = model = None
@@ -335,9 +361,10 @@ except Exception as exc:
     _model_err = str(exc)
 
 now_bst = datetime.now(BST_TZ)
+_tz_abbr = now_bst.strftime("%Z")
 st.title("📈 Live Trading Simulation — EUR/USD")
 st.caption(
-    f"🕒 **{now_bst.strftime('%d %b %Y  %H:%M:%S')} BST** | "
+    f"🕒 **{now_bst.strftime('%d %b %Y  %H:%M:%S')} {_tz_abbr}** | "
     f"Auto-refresh every {REFRESH_INTERVAL_S} s | "
     "Balance, Position & Price pulled live from OANDA Demo Account"
 )
@@ -384,19 +411,38 @@ if api:
     start_tick_stream(api, INSTRUMENT)
 
 if model:
-    bars = fetch_recent_bars(api, INSTRUMENT, lookback, window, granularity="M15")  # ← TESTING: change back to "M15" for production
+    try:
+        bars = _fetch_m15_bars_cached(api, INSTRUMENT, lookback, window)
+    except Exception:
+        bars = pd.DataFrame()
+
     if not bars.empty:
-        # Apply frozen-regime threshold adjustment before computing the signal.
-        _eff_long, _eff_short = _effective_thresholds(
-            long_threshold, short_threshold, _app.get("frozen_regime")
-        )
-        # Compute signal for auto-trade logic below — display is handled by _prediction_feed fragment
-        signal_result = predict_signal(
-            model, mean, std, feature_cols, lookback, window, bars,
-            long_threshold=_eff_long, short_threshold=_eff_short,
-        )
-        # Store latest signal in app state so fragment + auto-trade can both read it
-        _app["latest_signal"] = signal_result
+        # Freeze M15 volatility regime once per M15 candle boundary (never freeze UNKNOWN)
+        _candle_bar = now_bst.replace(
+            minute=(now_bst.minute // 15) * 15, second=0, microsecond=0
+        ).strftime("%Y-%m-%d %H:%M")
+        _cur_frozen = _app.get("frozen_regime")
+        if (
+            _candle_bar != _app.get("last_candle_bar")
+            or _cur_frozen is None
+            or _cur_frozen.get("regime") == "UNKNOWN"
+        ):
+            _new_regime = get_volatility_regime(bars["price"])
+            if _new_regime.get("regime") != "UNKNOWN":
+                _new_regime["frozen_at"] = now_bst.strftime("%H:%M %Z")
+                _app["frozen_regime"]   = _new_regime
+                _app["last_candle_bar"] = _candle_bar
+
+        # Only run LSTM inference when auto-trading is active
+        if _app["auto_trade"]:
+            _eff_long, _eff_short = _effective_thresholds(
+                long_threshold, short_threshold, _app.get("frozen_regime")
+            )
+            signal_result = predict_signal(
+                model, mean, std, feature_cols, lookback, window, bars,
+                long_threshold=_eff_long, short_threshold=_eff_short,
+            )
+            _app["latest_signal"] = signal_result
 
 for _e in _errs:
     st.warning(_e, icon="\u26a0\ufe0f")
@@ -601,28 +647,24 @@ def _prediction_feed():
         
         _bar_start = _bars.index[-1]
         _bar_end = _bar_start + pd.Timedelta(minutes=15)
-        _bar_ts = _bar_end.strftime("%Y-%m-%d %H:%M")
-        
-        _app["decision_log"].append({
-        "bar_start": _bar_start.strftime("%Y-%m-%d %H:%M"),
-        "bar_end": _bar_end.strftime("%Y-%m-%d %H:%M"),
-        "prob": round(float(_prob), 4) if _prob is not None else None,
-        "direction": _dir,
-         })
+        _bar_ts = _bar_end.strftime("%Y-%m-%d %H:%M %Z")
 
         # Persist for auto-trade + portfolio metric
         _app["latest_signal"]     = _sig
         _app["last_decision_bar"] = _bar_ts
-        _now_ts = datetime.now(BST_TZ).strftime("%H:%M:%S")
+        _now_ts = datetime.now(BST_TZ).strftime("%H:%M:%S %Z")
         _app["last_pred_updated"] = _now_ts
 
-        # Decision log — one entry per new bar
+        # Decision log — one clean entry per completed M15 bar
         if _bar_ts != _app.get("last_decision_bar_logged"):
             _app["last_decision_bar_logged"] = _bar_ts
             _app["decision_log"].append({
-                "bar":       _bar_ts,
+                "bar_start": _bar_start.strftime("%Y-%m-%d %H:%M %Z"),
+                "bar_end":   _bar_ts,
                 "prob":      round(float(_prob), 4) if _prob is not None else None,
                 "direction": _dir,
+                "long_thr":  round(_lt, 2),
+                "short_thr": round(_st, 2),
             })
             _app["decision_log"] = _app["decision_log"][-200:]
 
@@ -655,26 +697,24 @@ st.divider()
 @st.fragment(run_every=1)
 def _tick_feed():
     # ── 1. Drain real stream ticks into tick log ───────────────────────────
-    _stream_status = is_stream_running()
     _stream_price  = None  # most recent stream tick this second (if any)
     if api:
         new = drain_tick_buffer()
         if new:
             for t in new:
                 ts_str = t["time"].strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+                tz_str = t["time"].strftime("%Z")
                 _app["tick_log"].append(
-                    f"TICK: {ts_str} BST  |  Bid: {t['bid']:.5f}"
+                    f"TICK: {ts_str} {tz_str}  |  Bid: {t['bid']:.5f}"
                     f"  |  Ask: {t['ask']:.5f}  |  Mid: {t['price']:.5f}"
                 )
             _app["tick_log"] = _app["tick_log"][-500:]
             _stream_price = new[-1]   # use latest tick for this second
 
-    # ── 2. One price point per second, always timestamped with local NOW ───
-    # Using local time for every entry means the chart is ALWAYS time-ordered
-    # and never zigzags from OANDA stream timestamps being slightly in the past.
-    # Stream tick price takes priority; REST fills in when stream is quiet.
+    # ── 2. Append price point (stream takes priority; REST throttled to 5s) ─
     if api:
-        _now_iso = datetime.now(BST_TZ).isoformat()
+        _now_dt  = datetime.now(BST_TZ)
+        _now_iso = _now_dt.isoformat()
         if _stream_price:
             _app["price_history"].append({
                 "time": _now_iso, "stream": True,
@@ -682,30 +722,16 @@ def _tick_feed():
                 "price": _stream_price["price"],
             })
         else:
-            _rest = get_bid_ask_price(api, INSTRUMENT)
-            if _rest:
-                _app["price_history"].append({
-                    "time": _now_iso, "stream": False,
-                    "bid": _rest["bid"], "ask": _rest["ask"], "price": _rest["price"],
-                })
+            _now_epoch = _now_dt.timestamp()
+            if _now_epoch - float(_app.get("last_rest_poll_ts", 0.0)) >= 5.0:
+                _app["last_rest_poll_ts"] = _now_epoch
+                _rest = get_bid_ask_price(api, INSTRUMENT)
+                if _rest:
+                    _app["price_history"].append({
+                        "time": _now_iso, "stream": False,
+                        "bid": _rest["bid"], "ask": _rest["ask"], "price": _rest["price"],
+                    })
         _app["price_history"] = _app["price_history"][-2000:]
-
-    # ── 3. Freeze volatility regime at each new M15 candle boundary ───────
-    # "Frozen Regime per Candle": compute once at candle open, hold until next.
-    # Uses the last 15 minutes of collected price points (up to 900 entries
-    # at 1 tick/s) so temporal resolution matches the model decision frequency.
-    _now_bst = datetime.now(BST_TZ)
-    _candle_bar = _now_bst.replace(
-        minute=(_now_bst.minute // 15) * 15, second=0, microsecond=0
-    ).strftime("%Y-%m-%d %H:%M")
-    if _candle_bar != _app.get("last_candle_bar") and _app["price_history"]:
-        _ph_for_vol = _app["price_history"][-900:]   # last ~15 min of ticks
-        _vol_prices = pd.Series([p["price"] for p in _ph_for_vol])
-        _new_regime = get_volatility_regime(_vol_prices)
-        _new_regime["frozen_at"] = _now_bst.strftime("%H:%M")
-        _app["frozen_regime"]   = _new_regime
-        _app["last_candle_bar"] = _candle_bar
-
 
     if _app["price_history"]:
         _lt = _app["price_history"][-1]
@@ -722,7 +748,7 @@ def _tick_feed():
         with _pm2:
             st.metric("\U0001f7e2 Bid", f"{_lb:.5f}")
             _src_lbl = "\U0001f4e1 stream" if _is_stream else "\U0001f310 REST"
-            st.caption(f"Spread: {_sp} pts  |  {_src_lbl}")
+            st.caption(f"Spread: {_sp} pips  |  {_src_lbl}")
         with _pm3:
             st.metric("\U0001f7e3 Ask", f"{_la:.5f}")
     else:
@@ -796,7 +822,7 @@ def _tick_feed():
             template="plotly_dark",
             height=320,
             margin=dict(l=0, r=70, t=10, b=0),
-            xaxis_title="Time (BST)",
+            xaxis_title="Time (Europe/London)",
             yaxis=dict(
                 title="EUR/USD Mid",
                 range=[_y_min - _pad, _y_max + _pad],
@@ -912,5 +938,15 @@ def _trade_history_feed():
         st.info("No trades found for EUR/USD on this OANDA account.")
 
 _trade_history_feed()
+
+with st.expander("🧠 Session Model Decision Log", expanded=False):
+    if _app["decision_log"]:
+        st.dataframe(
+            pd.DataFrame(reversed(_app["decision_log"])),
+            use_container_width=True,
+            height=220,
+        )
+    else:
+        st.info("No model decisions logged yet in this session (start the bot to log M15 bar signals).")
 
 render_footer()
