@@ -30,12 +30,6 @@ from utils.ui import inject_page_chrome, render_disclaimer, render_footer
 
 BST_TZ = ZoneInfo("Europe/London")
 
-# ── Page config ────────────────────────────────────────────────────────────────
-st.set_page_config(
-    page_title="Backtest Engine",
-    page_icon="🔬",
-    layout="wide",
-)
 inject_page_chrome()
 
 st.title("🔬 Iterative Backtesting Engine")
@@ -286,7 +280,9 @@ if _bt_store["params"]:
         f"SL {_p.get('stop_loss', 0)*100:.2f}%  ·  "
         f"TP {_p.get('take_profit', 0)*100:.2f}%  ·  "
         f"Capital £{_p.get('capital', 0):,.0f}  ·  "
-        f"{_p.get('start_date', '?')} → {_p.get('end_date', '?')}"
+        f"{_p.get('start_date', '?')} → {_p.get('end_date', '?')}  \n"
+        "*Methodology: 1× unlevered simulated notional in GBP (EUR/USD returns applied directly; "
+        "actual per-bar bid-ask spread deducted on all closes; mark-to-market equity).*"
     )
 
 st.divider()
@@ -335,6 +331,20 @@ if not equity_df.empty and "nav" in equity_df.columns:
     # Starting capital baseline
     _fig.add_hline(y=capital, line_dash="dash",
                    line_color="rgba(255,255,255,0.3)", row=1, col=1)
+
+    # Shade in-sample training overlap if the run starts before OOS_START_DATE
+    _oos_ts = pd.Timestamp(OOS_START_DATE, tz=BST_TZ)
+    if _nav.index.min() < _oos_ts:
+        _shade_end = min(_oos_ts, _nav.index.max())
+        for _r in (1, 2):
+            _fig.add_vrect(
+                x0=_nav.index.min(), x1=_shade_end,
+                fillcolor="rgba(255, 193, 7, 0.08)",
+                line_width=0,
+                annotation_text="In-Sample (Training)" if _r == 1 else None,
+                annotation_position="top left",
+                row=_r, col=1,
+            )
 
     # Trade entry markers on equity curve (2 grouped traces with legend entries)
     if not trades_df.empty:

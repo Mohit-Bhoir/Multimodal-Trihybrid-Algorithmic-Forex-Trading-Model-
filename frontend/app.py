@@ -50,26 +50,29 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
-inject_page_chrome()
 
-# ── Header ─────────────────────────────────────────────────────────────────────
-_now_london = datetime.now(LONDON_TZ)
-_tz_abbr = _now_london.strftime("%Z")
-_ds_start, _ds_end, _ds_rows = _dataset_span()
 
-st.title("💹 EUR/USD LSTM Algorithmic Trading System")
-st.caption(
-    f"🕐 {_now_london.strftime('%d %b %Y  %H:%M:%S')} {_tz_abbr}  |  "
-    "All times displayed in Europe/London (GMT in winter, BST in summer)"
-)
-render_disclaimer()
-st.divider()
+def _render_home() -> None:
+    inject_page_chrome()
 
-# ── Navigation cards ───────────────────────────────────────────────────────────
-col1, col2 = st.columns(2, gap="large")
+    # ── Header ─────────────────────────────────────────────────────────────────
+    _now_london = datetime.now(LONDON_TZ)
+    _tz_abbr = _now_london.strftime("%Z")
+    _ds_start, _ds_end, _ds_rows = _dataset_span()
 
-with col1:
-    st.markdown("""
+    st.title("💹 EUR/USD LSTM Algorithmic Trading System")
+    st.caption(
+        f"🕐 {_now_london.strftime('%d %b %Y  %H:%M:%S')} {_tz_abbr}  |  "
+        "All times displayed in Europe/London (GMT in winter, BST in summer)"
+    )
+    render_disclaimer()
+    st.divider()
+
+    # ── Navigation cards ───────────────────────────────────────────────────────
+    col1, col2 = st.columns(2, gap="large")
+
+    with col1:
+        st.markdown("""
 ### 📈 Live Trading Simulation
 
 Connect to the **OANDA v20 Practice API** and run the LSTM model in real time.
@@ -84,11 +87,11 @@ Connect to the **OANDA v20 Practice API** and run the LSTM model in real time.
 
 > Auto-refreshes every **15 seconds** with live OANDA streaming ticks.
 """)
-    if st.button("📈  Open Live Trading", use_container_width=True, type="primary"):
-        st.switch_page("pages/1_Live_Trading.py")
+        if st.button("📈  Open Live Trading", use_container_width=True, type="primary"):
+            st.switch_page("pages/1_Live_Trading.py")
 
-with col2:
-    st.markdown(f"""
+    with col2:
+        st.markdown(f"""
 ### 🔬 Iterative Backtesting Engine
 
 Simulate the LSTM strategy on **historical M15 EUR/USD data** before going live.
@@ -103,23 +106,23 @@ Simulate the LSTM strategy on **historical M15 EUR/USD data** before going live.
 
 > Results can be **exported as JSON** or **deployed directly to Live Trading**.
 """)
-    if st.button("🔬  Open Backtest Engine", use_container_width=True):
-        st.switch_page("pages/2_Backtest.py")
+        if st.button("🔬  Open Backtest Engine", use_container_width=True):
+            st.switch_page("pages/2_Backtest.py")
 
-st.divider()
+    st.divider()
 
-# ── ML Pipeline card ───────────────────────────────────────────────────────────
-st.markdown("### ⚙️ MLOps Pipeline *(Local Docker / Apache Airflow — Astro CLI)*")
-st.caption(
-    "The Airflow DAGs below run in the local Docker/Astronomer stack (`dags/`) rather than inside "
-    "Streamlit Community Cloud. This hosted demo serves the committed model and dataset snapshot "
-    f"(`{_ds_start}` → `{_ds_end}`)."
-)
+    # ── ML Pipeline card ───────────────────────────────────────────────────────
+    st.markdown("### ⚙️ MLOps Pipeline *(Local Docker / Apache Airflow — Astro CLI)*")
+    st.caption(
+        "The Airflow DAGs below run in the local Docker/Astronomer stack (`dags/`) rather than inside "
+        "Streamlit Community Cloud. This hosted demo serves the committed model and dataset snapshot "
+        f"(`{_ds_start}` → `{_ds_end}`)."
+    )
 
-pipe_col1, pipe_col2 = st.columns(2, gap="large")
+    pipe_col1, pipe_col2 = st.columns(2, gap="large")
 
-with pipe_col1:
-    st.markdown("""
+    with pipe_col1:
+        st.markdown("""
 **Daily Data Refresh** *(`dags/daily_data_refresh.py` — Mon–Fri 22:00 UTC)*
 
 Fetches the latest completed M15 EUR/USD candles from OANDA via the count-based
@@ -132,8 +135,8 @@ API and appends them to the backtest CSV with timestamp deduplication.
 | Dedup | Timestamp-keyed, append-only |
 """)
 
-with pipe_col2:
-    st.markdown("""
+    with pipe_col2:
+        st.markdown("""
 **Weekly LSTM Retraining** *(`dags/retrain_lstm.py` — Sunday 02:00 UTC)*
 
 End-to-end retraining DAG with `TimeSeriesSplit` hyperparameter grid search and
@@ -148,10 +151,10 @@ End-to-end retraining DAG with `TimeSeriesSplit` hyperparameter grid search and
 | Archive & Promote | Archives artifacts locally and promotes `lstm_model.h5` on PASS |
 """)
 
-st.divider()
+    st.divider()
 
-# ── System overview ────────────────────────────────────────────────────────────
-st.markdown("""
+    # ── System overview ────────────────────────────────────────────────────────
+    st.markdown("""
 #### ℹ️ System Overview
 
 | Component | Detail |
@@ -167,4 +170,14 @@ st.markdown("""
 | **Timezone** | `Europe/London` — automatically displays GMT (UTC+0) in winter and BST (UTC+1) in summer |
 """)
 
-render_footer()
+    render_footer()
+
+
+_nav = st.navigation(
+    [
+        st.Page(_render_home, title="Home", icon="🏠", default=True),
+        st.Page("pages/1_Live_Trading.py", title="Live Trading", icon="📈"),
+        st.Page("pages/2_Backtest.py", title="Backtest Engine", icon="🔬"),
+    ]
+)
+_nav.run()

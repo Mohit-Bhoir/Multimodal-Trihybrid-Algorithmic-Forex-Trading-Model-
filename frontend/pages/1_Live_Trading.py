@@ -32,8 +32,6 @@ from utils.trading_engine import (
 )
 from utils.ui import inject_page_chrome, render_disclaimer, render_footer
 
-st.set_page_config(page_title="Live Trading", page_icon="📈", layout="wide")
-
 try:
     from streamlit_autorefresh import st_autorefresh
     REFRESH_INTERVAL_S = 15
@@ -459,7 +457,7 @@ if _close_btn:
         try:
             api.create_order(INSTRUMENT, _cu, suppress=True, ret=True)
             _app["trade_log"].append(dict(
-                time=now_bst.strftime("%Y-%m-%d %H:%M:%S"),
+                time=now_bst.isoformat(),
                 action="MANUAL_CLOSE", price=latest_price,
                 units=_cu, upl_at_close=oanda_pos["unrealized_pl"],
             ))
@@ -475,7 +473,7 @@ if _close_btn:
 if _app["auto_trade"] and latest_price:
     _cur_side = oanda_pos["side"]
     _cur_avg  = oanda_pos["avg_price"]
-    _now_str  = now_bst.strftime("%Y-%m-%d %H:%M:%S")
+    _now_str  = now_bst.isoformat()
 
     # ── Stop Loss / Take Profit check ──────────────────────────────────────
     if _cur_side != 0 and _cur_avg:

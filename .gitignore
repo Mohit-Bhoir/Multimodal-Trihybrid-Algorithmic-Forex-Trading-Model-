@@ -8,4 +8,6 @@ src/__pycache__/
 .dockerignore
 .strategies/
 __pycache__/
+**/__pycache__/
+*.pyc
 data/Data_check.ipynb
