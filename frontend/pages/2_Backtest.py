@@ -6,8 +6,9 @@ inspect equity curve / drawdown, trade log, and deploy to live.
 All times in British Summer Time (Europe/London).
 """
 
+import json
 import sys
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -60,10 +61,15 @@ for _k, _v in _BT_UI_DEFAULTS.items():
         st.session_state[f"bt_{_k}"] = _v
 
 
-@st.cache_resource
+# Out-of-sample split boundary (model trained on data up to 2026-01-08)
+OOS_START_DATE = date(2026, 1, 9)
+
+
 def _get_bt_results() -> dict:
-    """Persist last backtest result + params across refreshes and page navigation."""
-    return {"result": None, "params": {}}
+    """Persist last backtest result + params per user session."""
+    if "bt_results_store" not in st.session_state:
+        st.session_state["bt_results_store"] = {"result": None, "params": {}}
+    return st.session_state["bt_results_store"]
 
 
 try:
@@ -99,6 +105,7 @@ if all_data.empty:
 
 _d_min = all_data.index.min().date()
 _d_max = all_data.index.max().date()
+_default_start = max(_d_min, min(OOS_START_DATE, _d_max))
 
 # ── Sidebar: all strategy inputs ──────────────────────────────────────────────
 with st.sidebar:
@@ -106,10 +113,17 @@ with st.sidebar:
 
     # ── Date range ────────────────────────────────────────────────────────────
     st.subheader("📅 Date Range")
-    start_date = st.date_input("Start Date", value=_d_min,
-                               min_value=_d_min, max_value=_d_max)
+    start_date = st.date_input("Start Date", value=_default_start,
+                               min_value=_d_min, max_value=_d_max,
+                               help=f"Defaults to out-of-sample start ({OOS_START_DATE}). "
+                                    f"Dates before {OOS_START_DATE} overlap the LSTM training set.")
     end_date   = st.date_input("End Date",   value=_d_max,
                                min_value=_d_min, max_value=_d_max)
+    if start_date < OOS_START_DATE:
+        st.warning(
+            f"⚠️ Selected range overlaps in-sample training data "
+            f"(`{_d_min}` → `2026-01-08`). For unbiased evaluation, start on or after `{OOS_START_DATE}`.",
+        )
 
     # ── Signal thresholds ─────────────────────────────────────────────────────
     st.subheader("🎯 Signal Thresholds")
@@ -202,9 +216,15 @@ if _bt_store["result"] is None:
     with st.expander("📂 Available Data Preview"):
         st.write(
             f"**{len(all_data):,} bars** available — "
-            f"{_d_min} → {_d_max} (M15, BST)"
+            f"{_d_min} → {_d_max} (M15, Europe/London)  ·  "
+            f"Out-of-sample test window: `{OOS_START_DATE}` → `{_d_max}`"
         )
-        st.dataframe(all_data.tail(30), use_container_width=True)
+        _preview = all_data.tail(30).copy()
+        if "price" in _preview.columns:
+            _preview["price"] = _preview["price"].round(5)
+        if "spread" in _preview.columns:
+            _preview["spread"] = _preview["spread"].round(5)
+        st.dataframe(_preview, use_container_width=True)
     st.stop()
 
 # ── Results ────────────────────────────────────────────────────────────────────
@@ -212,6 +232,12 @@ result    = _bt_store["result"]
 metrics   = result.get("metrics", {})
 equity_df = result.get("equity_curve", pd.DataFrame())
 trades_df = result.get("trades",       pd.DataFrame())
+
+if _bt_store["params"] and _bt_store["params"].get("start_date", "") < str(OOS_START_DATE):
+    st.warning(
+        f"⚠️ **In-Sample Overlap:** This run includes bars prior to `{OOS_START_DATE}` that were "
+        f"part of the LSTM training/validation dataset. Treat metrics on that period as in-sample.",
+    )
 
 # ── Metrics panel ──────────────────────────────────────────────────────────────
 st.subheader("📊 Performance Metrics")
@@ -236,9 +262,9 @@ with _m6:
 # Secondary row
 _s1, _s2, _s3, _s4, _s5 = st.columns(5)
 with _s1:
-    st.metric("Avg Win (£)", f"{metrics.get('avg_win', 0):+,.4f}")
+    st.metric("Avg Win (£)", f"£{metrics.get('avg_win', 0):+,.2f}")
 with _s2:
-    st.metric("Avg Loss (£)", f"{metrics.get('avg_loss', 0):+,.4f}")
+    st.metric("Avg Loss (£)", f"£{metrics.get('avg_loss', 0):+,.2f}")
 with _s3:
     _aw = abs(metrics.get("avg_win", 0))
     _al = abs(metrics.get("avg_loss", 1)) or 1
@@ -310,23 +336,26 @@ if not equity_df.empty and "nav" in equity_df.columns:
     _fig.add_hline(y=capital, line_dash="dash",
                    line_color="rgba(255,255,255,0.3)", row=1, col=1)
 
-    # Trade entry markers on equity curve
+    # Trade entry markers on equity curve (2 grouped traces with legend entries)
     if not trades_df.empty:
-        _entries = trades_df[trades_df["action"].isin(["LONG", "SHORT"])]
-        for _, _tr in _entries.iterrows():
-            _nav_at = float(_nav.asof(_tr["time"])) if hasattr(_nav, "asof") else capital
-            _col    = "#4CAF50" if _tr["action"] == "LONG" else "#F44336"
-            _sym    = "triangle-up" if _tr["action"] == "LONG" else "triangle-down"
-            _fig.add_trace(
-                go.Scatter(
-                    x=[_tr["time"]], y=[_nav_at],
-                    mode="markers",
-                    marker=dict(symbol=_sym, size=9, color=_col,
-                                line=dict(width=1, color="white")),
-                    showlegend=False, name=_tr["action"],
-                ),
-                row=1, col=1,
-            )
+        for _act, _lbl, _col, _sym in [
+            ("LONG",  "Long Entry",  "#4CAF50", "triangle-up"),
+            ("SHORT", "Short Entry", "#F44336", "triangle-down"),
+        ]:
+            _sub = trades_df[trades_df["action"] == _act]
+            if not _sub.empty:
+                _xs = _sub["time"].tolist()
+                _ys = [float(_nav.asof(_t)) if hasattr(_nav, "asof") else capital for _t in _xs]
+                _fig.add_trace(
+                    go.Scatter(
+                        x=_xs, y=_ys,
+                        mode="markers",
+                        marker=dict(symbol=_sym, size=9, color=_col,
+                                    line=dict(width=1, color="white")),
+                        showlegend=True, name=_lbl,
+                    ),
+                    row=1, col=1,
+                )
 
     # Drawdown
     _fig.add_trace(
@@ -343,7 +372,7 @@ if not equity_df.empty and "nav" in equity_df.columns:
         showlegend=True,
         legend=dict(orientation="h", yanchor="top", y=1.0, xanchor="left", x=0),
     )
-    _fig.update_xaxes(title_text="Time (BST)", row=2, col=1)
+    _fig.update_xaxes(title_text="Time (Europe/London)", row=2, col=1)
     _fig.update_yaxes(title_text="£", row=1, col=1)
     _fig.update_yaxes(title_text="%", row=2, col=1)
 
@@ -356,7 +385,17 @@ st.subheader("📋 Trade Log")
 
 if not trades_df.empty:
     _display = trades_df.sort_values("time", ascending=False).reset_index(drop=True)
-    st.dataframe(_display, use_container_width=True, height=320)
+    st.dataframe(
+        _display,
+        use_container_width=True,
+        height=320,
+        column_config={
+            "entry": st.column_config.NumberColumn("entry", format="%.5f"),
+            "exit":  st.column_config.NumberColumn("exit",  format="%.5f"),
+            "pnl":   st.column_config.NumberColumn("pnl (£)", format="£%.2f"),
+            "prob":  st.column_config.NumberColumn("prob",  format="%.4f"),
+        },
+    )
 else:
     st.info("No trades were executed in the selected period.")
 
@@ -368,39 +407,18 @@ _b1, _b2, _b3 = st.columns(3)
 with _b1:
     _p = _bt_store["params"]
     _m = metrics
-    _report_lines = [
-        "EUR/USD LSTM Strategy Report",
-        "=" * 40,
-        f"Date Range : {_p.get('start_date','?')}  →  {_p.get('end_date','?')}",
-        "",
-        "--- Parameters ---",
-        f"Long Threshold  : {_p.get('long_threshold', '?'):.2f}",
-        f"Short Threshold : {_p.get('short_threshold', '?'):.2f}",
-        f"Stop Loss       : {_p.get('stop_loss', 0)*100:.2f}%",
-        f"Take Profit     : {_p.get('take_profit', 0)*100:.2f}%",
-        f"Starting Capital: £{_p.get('capital', 0):,.2f}",
-        "",
-        "--- Performance Metrics ---",
-        f"Total Return    : {_m.get('total_return_pct', 0):+.2f}%",
-        f"Final NAV       : £{_m.get('final_nav', 0):,.2f}",
-        f"Sharpe Ratio    : {_m.get('sharpe', 0):.3f}",
-        f"Max Drawdown    : {_m.get('max_drawdown_pct', 0):.2f}%",
-        f"Trade Count     : {_m.get('trade_count', 0)}",
-        f"Win Rate        : {_m.get('win_rate_pct', 0):.1f}%",
-        f"Avg Win         : £{_m.get('avg_win', 0):+,.4f}",
-        f"Avg Loss        : £{_m.get('avg_loss', 0):+,.4f}",
-        f"SL Triggered    : {_m.get('sl_count', 0)}",
-        f"TP Triggered    : {_m.get('tp_count', 0)}",
-        "",
-        f"Generated       : {datetime.now(BST_TZ).strftime('%Y-%m-%d %H:%M:%S %Z')}",
-    ]
-    _report_text = "\n".join(_report_lines)
-    _fname = f"strategy_{datetime.now(BST_TZ).strftime('%Y%m%d_%H%M%S')}.txt"
+    _payload = {
+        "generated_at": datetime.now(BST_TZ).strftime("%Y-%m-%d %H:%M:%S %Z"),
+        "parameters":   _p,
+        "metrics":      _m,
+    }
+    _report_json = json.dumps(_payload, indent=2, default=str)
+    _fname = f"strategy_{datetime.now(BST_TZ).strftime('%Y%m%d_%H%M%S')}.json"
     st.download_button(
-        label="💾  Save Strategy",
-        data=_report_text,
+        label="💾  Save Strategy (JSON)",
+        data=_report_json,
         file_name=_fname,
-        mime="text/plain",
+        mime="application/json",
         use_container_width=True,
     )
 

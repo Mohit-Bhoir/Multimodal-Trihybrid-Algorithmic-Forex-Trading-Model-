@@ -352,6 +352,17 @@ def predict_signal(model, mean, std, feature_cols, lookback, window,
     return {"prob": prob, "lstm_signal": sig, "combined": sig, "direction": direction}
 
 
+def _fmt_oanda_ts(raw_ts) -> str | None:
+    """Convert an OANDA RFC3339 UTC timestamp string to Europe/London with tz abbr."""
+    if not raw_ts:
+        return None
+    try:
+        dt = pd.to_datetime(str(raw_ts), utc=True).tz_convert(BST)
+        return dt.strftime("%Y-%m-%d %H:%M:%S %Z")
+    except Exception:
+        return str(raw_ts)[:19].replace("T", " ") + " UTC"
+
+
 def get_recent_trades(api, instrument: str, count: int = 30) -> list:
     """Fetch recent open + closed trades for *instrument* from OANDA.
 
@@ -373,7 +384,7 @@ def get_recent_trades(api, instrument: str, count: int = 30) -> list:
                     "id":            str(t.id),
                     "state":         "OPEN",
                     "side":          "LONG" if units > 0 else "SHORT",
-                    "open_time":     str(t.openTime)[:19].replace("T", " "),
+                    "open_time":     _fmt_oanda_ts(t.openTime),
                     "close_time":    None,
                     "units":         abs(units),
                     "open_price":    round(float(t.price), 5),
@@ -399,8 +410,8 @@ def get_recent_trades(api, instrument: str, count: int = 30) -> list:
                     "id":            str(t.id),
                     "state":         "CLOSED",
                     "side":          "LONG" if init_units > 0 else "SHORT",
-                    "open_time":     str(t.openTime)[:19].replace("T", " "),
-                    "close_time":    str(getattr(t, "closeTime", ""))[:19].replace("T", " ") or None,
+                    "open_time":     _fmt_oanda_ts(t.openTime),
+                    "close_time":    _fmt_oanda_ts(getattr(t, "closeTime", None)),
                     "units":         abs(init_units),
                     "open_price":    round(float(t.price), 5),
                     "close_price":   round(float(getattr(t, "averageClosePrice", 0) or 0), 5) or None,
@@ -544,9 +555,15 @@ class BacktestEngine:
         ])                                      # shape: (N, lookback, features)
         all_probs = self.model.predict(sequences, verbose=0, batch_size=512).reshape(-1)
 
-        # ── Simulate bar-by-bar ───────────────────────────────────────────────
-        nav       = self.capital
-        position  = 0       # 0 = flat, 1 = long, -1 = short
+        # ── Simulate bar-by-bar (mark-to-market equity + spread on all closes) ─
+        def _bar_spread(bar_ts) -> float:
+            if has_spread and bar_ts in raw_data.index:
+                val = raw_data.at[bar_ts, "spread"]
+                return float(val.iloc[-1]) if hasattr(val, "iloc") else float(val)
+            return 0.0
+
+        nav       = self.capital   # realised cash NAV
+        position  = 0              # 0 = flat, 1 = long, -1 = short
         entry_px  = None
         equity    = []
         trades    = []
@@ -555,61 +572,64 @@ class BacktestEngine:
             ts    = df.index[i]
             price = float(df["price"].iloc[i])
 
-            # ── Stop-loss / Take-profit ───────────────────────────────────────
+            # ── Stop-loss / Take-profit (filled at actual bar close + spread) ─
             if position != 0 and entry_px is not None:
                 ret = (price - entry_px) / entry_px * position
-                if ret <= -self.stop_loss:
-                    pnl  = nav * (-self.stop_loss)
+                if ret <= -self.stop_loss or ret >= self.take_profit:
+                    action = "SL_CLOSE" if ret <= -self.stop_loss else "TP_CLOSE"
+                    spread_cost = abs(nav * _bar_spread(ts) / price)
+                    pnl  = nav * ret - spread_cost
                     nav += pnl
-                    trades.append(_trade(ts, "SL_CLOSE",  entry_px, price, pnl, position, None))
-                    position = 0;  entry_px = None
-                    equity.append({"time": ts, "nav": nav})
-                    continue
-                elif ret >= self.take_profit:
-                    pnl  = nav * self.take_profit
-                    nav += pnl
-                    trades.append(_trade(ts, "TP_CLOSE",  entry_px, price, pnl, position, None))
-                    position = 0;  entry_px = None
+                    trades.append(_trade(ts, action, entry_px, price, pnl, position, None))
+                    position = 0
+                    entry_px = None
                     equity.append({"time": ts, "nav": nav})
                     continue
 
             # ── Model signal ──────────────────────────────────────────────────
             prob    = float(all_probs[idx])
-            sig     = (prob - 0.5) * 2
-            new_pos = _resolve_position(prob, sig, self.long_threshold,
-                                        self.short_threshold, self.min_confidence)
+            new_pos = _resolve_position(prob, self.long_threshold, self.short_threshold)
 
             # ── Trade on position change ──────────────────────────────────────
             if new_pos != position:
                 if position != 0 and entry_px is not None:
-                    ret  = (price - entry_px) / entry_px * position
-                    # Use actual per-bar spread from data; fall back to 0.
-                    # Look up by label (df index is a subset of raw_data after dropna)
-                    bar_ts = df.index[i]
-                    bar_spread = (float(raw_data.at[bar_ts, "spread"])
-                                  if has_spread and bar_ts in raw_data.index else 0.0)
-                    pnl  = nav * ret - abs(nav * bar_spread / price)
+                    ret = (price - entry_px) / entry_px * position
+                    spread_cost = abs(nav * _bar_spread(ts) / price)
+                    pnl  = nav * ret - spread_cost
                     nav += pnl
                     trades.append(_trade(ts, f"CLOSE_{'LONG' if position==1 else 'SHORT'}",
                                          entry_px, price, pnl, position, round(prob, 4)))
-                    position = 0;  entry_px = None
+                    position = 0
+                    entry_px = None
 
                 if new_pos != 0:
-                    position = new_pos;  entry_px = price
+                    position = new_pos
+                    entry_px = price
                     trades.append(_trade(ts, "LONG" if new_pos == 1 else "SHORT",
                                          price, None, 0.0, new_pos, round(prob, 4)))
 
-            equity.append({"time": ts, "nav": nav})
+            # Mark-to-market equity includes unrealised P&L while in a position
+            if position != 0 and entry_px is not None:
+                unreal_ret = (price - entry_px) / entry_px * position
+                mtm_nav = nav * (1.0 + unreal_ret)
+            else:
+                mtm_nav = nav
+            equity.append({"time": ts, "nav": mtm_nav})
 
-        # Close any open position at end of data
+        # Close any open position at end of data (with spread deducted)
         if position != 0 and entry_px is not None:
+            last_ts = df.index[-1]
             last_px = float(df["price"].iloc[-1])
-            ret  = (last_px - entry_px) / entry_px * position
-            pnl  = nav * ret
+            ret = (last_px - entry_px) / entry_px * position
+            spread_cost = abs(nav * _bar_spread(last_ts) / last_px)
+            pnl  = nav * ret - spread_cost
             nav += pnl
-            trades.append(_trade(df.index[-1], "END_CLOSE",
+            trades.append(_trade(last_ts, "END_CLOSE",
                                  entry_px, last_px, pnl, position, None))
-            equity.append({"time": df.index[-1], "nav": nav})
+            if equity:
+                equity[-1]["nav"] = nav
+            else:
+                equity.append({"time": last_ts, "nav": nav})
 
         equity_df = (pd.DataFrame(equity).set_index("time")
                      if equity else pd.DataFrame(columns=["nav"]))
@@ -629,7 +649,7 @@ def _trade(ts, action, entry, exit_, pnl, side, prob):
                 pnl=round(float(pnl), 4), side=side, prob=prob)
 
 
-def _resolve_position(prob, sig, long_thr, short_thr, min_conf):
+def _resolve_position(prob: float, long_thr: float, short_thr: float) -> int:
     if   prob >= long_thr:       return 1
     elif prob <= short_thr:      return -1
     else:                        return 0

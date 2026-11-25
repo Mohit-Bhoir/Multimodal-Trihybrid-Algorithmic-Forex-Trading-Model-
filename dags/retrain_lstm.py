@@ -498,6 +498,7 @@ def iterative_backtest_venv(
 
     # -- Single window simulation ----------------------------------------------
     def run_window(raw_data):
+        has_spread = "spread" in raw_data.columns
         df = gen_features(raw_data[["price"]].copy(), window)
         min_bars = lookback + 200
         if len(df) < min_bars:
@@ -513,23 +514,27 @@ def iterative_backtest_venv(
         ])
         all_probs = model.predict(sequences, verbose=0, batch_size=512).reshape(-1)
 
+        def _spread_at(bar_ts):
+            if has_spread and bar_ts in raw_data.index:
+                val = raw_data.at[bar_ts, "spread"]
+                return float(val.iloc[-1]) if hasattr(val, "iloc") else float(val)
+            return 0.0
+
         nav = 100_000.0; position = 0; entry_px = None
         equity = []; trades = []
         SL, TP, LT, ST = 0.005, 0.010, 0.55, 0.45
 
         for idx, i in enumerate(range(lookback, n)):
+            ts    = df.index[i]
             price = float(df["price"].iloc[i])
 
             if position != 0 and entry_px is not None:
                 ret = (price - entry_px) / entry_px * position
-                if ret <= -SL:
-                    pnl = nav * (-SL); nav += pnl
-                    trades.append({"pnl": pnl, "action": "SL_CLOSE"})
-                    position = 0; entry_px = None
-                    equity.append(nav); continue
-                elif ret >= TP:
-                    pnl = nav * TP; nav += pnl
-                    trades.append({"pnl": pnl, "action": "TP_CLOSE"})
+                if ret <= -SL or ret >= TP:
+                    action = "SL_CLOSE" if ret <= -SL else "TP_CLOSE"
+                    pnl = nav * ret - abs(nav * _spread_at(ts) / price)
+                    nav += pnl
+                    trades.append({"pnl": pnl, "action": action})
                     position = 0; entry_px = None
                     equity.append(nav); continue
 
@@ -538,21 +543,31 @@ def iterative_backtest_venv(
 
             if new_pos != position:
                 if position != 0 and entry_px is not None:
-                    pnl = nav * (price - entry_px) / entry_px * position
+                    ret = (price - entry_px) / entry_px * position
+                    pnl = nav * ret - abs(nav * _spread_at(ts) / price)
                     nav += pnl
                     trades.append({"pnl": pnl, "action": "CLOSE"})
                     position = 0; entry_px = None
                 if new_pos != 0:
                     position = new_pos; entry_px = price
 
-            equity.append(nav)
+            mtm_nav = (
+                nav * (1.0 + (price - entry_px) / entry_px * position)
+                if position != 0 and entry_px is not None else nav
+            )
+            equity.append(mtm_nav)
 
         if position != 0 and entry_px is not None:
+            last_ts = df.index[-1]
             last_px = float(df["price"].iloc[-1])
-            pnl = nav * (last_px - entry_px) / entry_px * position
+            ret = (last_px - entry_px) / entry_px * position
+            pnl = nav * ret - abs(nav * _spread_at(last_ts) / last_px)
             nav += pnl
             trades.append({"pnl": pnl, "action": "END_CLOSE"})
-            equity.append(nav)
+            if equity:
+                equity[-1] = nav
+            else:
+                equity.append(nav)
 
         if len(equity) < 2:
             return {"error": "No equity data"}
@@ -583,7 +598,8 @@ def iterative_backtest_venv(
     train_df = pd.read_csv(train_csv, parse_dates=["time"], index_col="time")
 
     warmup_needed   = 200 + window + lookback
-    warmup_tail     = train_df.tail(warmup_needed)
+    combined_df     = pd.concat([train_df.tail(warmup_needed), test_df])
+    train_offset    = len(train_df.tail(warmup_needed))
     rows_per_window = max(len(test_df) // wf_windows, warmup_needed)
     window_results  = []
 
@@ -601,7 +617,10 @@ def iterative_backtest_venv(
             print(f"[iterative_backtest] Window {w+1}: too few rows -- skipping.")
             continue
 
-        result = run_window(pd.concat([warmup_tail, w_slice]))
+        # Use contiguous preceding bars for warmup so there is no price gap
+        c_start = max(0, train_offset + w_start - warmup_needed)
+        c_end   = train_offset + w_end
+        result = run_window(combined_df.iloc[c_start:c_end])
         if "error" in result:
             print(f"[iterative_backtest] Window {w+1}: {result['error']}")
             continue
